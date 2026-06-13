@@ -11,6 +11,7 @@ type TextBox struct {
 	BG        tui.Color
 	FocusFG   tui.Color
 	FocusBG   tui.Color
+	OnSubmit  func()
 }
 
 func NewTextBox(text string, bounds Rect) *TextBox {
@@ -27,6 +28,7 @@ func NewTextBox(text string, bounds Rect) *TextBox {
 	box.Component.DrawFn = box.draw
 	box.Component.OnTypeFn = box.handleType
 	box.Component.OnClickFn = box.handleClick
+	box.Component.CursorFn = box.cursorPos
 	return box
 }
 
@@ -62,14 +64,28 @@ func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 	}
 	if component.HasFocus {
 		t.ensureCursorVisible(abs.W)
-		cursorX := abs.X + (t.Cursor - t.ScrollX)
-		if abs.Contains(cursorX, abs.Y) {
-			surface.SetCell(cursorX, abs.Y, cursorCell(fg, bg))
-		}
 	}
 }
 
+// cursorPos reports the absolute caret position for the hardware cursor.
+func (t *TextBox) cursorPos(component *VisualComponent) (int, int, bool) {
+	abs := component.AbsoluteBounds()
+	t.ensureCursorVisible(abs.W)
+	cursorX := abs.X + (t.Cursor - t.ScrollX)
+	if !abs.Contains(cursorX, abs.Y) {
+		return 0, 0, false
+	}
+	return cursorX, abs.Y, true
+}
+
 func (t *TextBox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
+	if event.Key == tui.KeyEnter {
+		if t.OnSubmit == nil {
+			return false
+		}
+		t.OnSubmit()
+		return true
+	}
 	if event.Key == tui.KeyBackspace {
 		if t.Cursor <= 0 || len(t.Text) == 0 {
 			return true

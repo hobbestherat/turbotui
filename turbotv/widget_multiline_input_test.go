@@ -40,3 +40,36 @@ func TestMultiLineInputClickSetsWrappedCursor(t *testing.T) {
 		t.Fatalf("expected wrapped click cursor at (0,5), got (%d,%d)", input.CursorY, input.CursorX)
 	}
 }
+
+func TestMultiLineInputSubmitModeEnterDefault(t *testing.T) {
+	input := NewMultiLineInput("abc", Rect{X: 0, Y: 0, W: 8, H: 2})
+	submits := 0
+	input.OnSubmit = func() {
+		submits++
+	}
+	_ = input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyEnter})
+	if submits != 1 {
+		t.Fatalf("expected plain Enter to submit by default, got submits=%d", submits)
+	}
+	_ = input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyEnter, Shift: true})
+	if submits != 1 {
+		t.Fatalf("expected Shift+Enter to insert a newline by default, got submits=%d", submits)
+	}
+}
+
+func TestMultiLineInputSubmitModeShiftEnter(t *testing.T) {
+	input := NewMultiLineInput("abc", Rect{X: 0, Y: 0, W: 8, H: 2})
+	input.SubmitMode = MultiLineSubmitOnShiftEnter
+	submits := 0
+	input.OnSubmit = func() {
+		submits++
+	}
+	_ = input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyEnter})
+	if submits != 0 {
+		t.Fatalf("expected plain Enter to insert newline in ShiftEnter mode, got submits=%d", submits)
+	}
+	_ = input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyEnter, Shift: true})
+	if submits != 1 {
+		t.Fatalf("expected Shift+Enter to submit in ShiftEnter mode, got submits=%d", submits)
+	}
+}

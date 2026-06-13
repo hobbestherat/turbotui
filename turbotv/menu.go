@@ -384,9 +384,13 @@ func (m *MenuBar) HandleKey(event tui.TypeEvent) bool {
 		}
 	case tui.KeyRune:
 		if event.Alt {
+			// Alt+letter first tries to switch to another top-level menu; if no top
+			// menu owns the letter, fall back to selecting an item at the current
+			// level, so "Alt+F Alt+X" works just like "Alt+F x".
 			if m.OpenTopByMnemonic(unicodeLower(event.Rune)) {
 				return true
 			}
+			m.selectByMnemonic(unicodeLower(event.Rune))
 			return true
 		}
 		if event.Ctrl {

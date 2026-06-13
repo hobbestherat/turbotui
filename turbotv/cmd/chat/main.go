@@ -55,9 +55,11 @@ func main() {
 
 	history := tv.NewTextView("", tv.Rect{})
 	history.Wrap = true
-	history.AddColored("[Agent] Welcome! Type a message and press Ctrl+Enter or Send.", colorAgent)
+	history.AddColored("[Agent] Welcome! Type a message and press Enter (Shift+Enter for a new line) or Send.", colorAgent)
 
 	input := tv.NewMultiLineInput("", tv.Rect{})
+	// Default mode: Enter sends, Shift+Enter inserts a newline.
+	input.SubmitMode = tv.MultiLineSubmitOnEnter
 	sendButton := tv.NewButton("&Send", tv.Rect{}, nil)
 
 	log := tv.NewTextView("", tv.Rect{})
@@ -117,12 +119,39 @@ func main() {
 	sendButton.OnPress = send
 	input.OnSubmit = send
 
+	// splitRatio is the left pane's fraction of the content width; the divider can
+	// be dragged with the mouse to change it (where the terminal reports drags).
+	splitRatio := 80
 	divider := tv.NewComponent(tv.Rect{})
 	divider.DrawFn = func(component *tv.VisualComponent, surface tv.Surface) {
 		abs := component.AbsoluteBounds()
 		for y := 0; y < abs.H; y++ {
 			surface.SetCell(abs.X, abs.Y+y, tui.Cell{Ch: '│', FG: tui.ANSIColor(7), BG: tui.ANSIColor(4)})
 		}
+	}
+	divider.OnClickFn = func(component *tv.VisualComponent, event tui.ClickEvent) bool {
+		if !event.Down {
+			return true
+		}
+		content := component.Parent
+		if content == nil {
+			return true
+		}
+		abs := content.AbsoluteBounds()
+		if abs.W < 4 {
+			return true
+		}
+		ratio := (event.X - abs.X) * 100 / abs.W
+		if ratio < 20 {
+			ratio = 20
+		}
+		if ratio > 90 {
+			ratio = 90
+		}
+		splitRatio = ratio
+		content.SetBounds(content.Bounds) // re-run the split LayoutFn
+		desktop.Redraw()
+		return true
 	}
 
 	leftLabel := tv.NewLabel("Chat", tv.Rect{})
@@ -172,7 +201,13 @@ func main() {
 	window.Content.LayoutFn = func(content *tv.VisualComponent) {
 		w := content.Bounds.W
 		h := content.Bounds.H
-		leftW := w * 80 / 100
+		leftW := w * splitRatio / 100
+		if leftW < 1 {
+			leftW = 1
+		}
+		if leftW > w-2 {
+			leftW = w - 2
+		}
 		left.SetBounds(tv.Rect{X: 0, Y: 0, W: leftW, H: h})
 		divider.SetBounds(tv.Rect{X: leftW, Y: 0, W: 1, H: h})
 		right.SetBounds(tv.Rect{X: leftW + 1, Y: 0, W: w - leftW - 1, H: h})

@@ -48,10 +48,11 @@ const (
 )
 
 type TypeEvent struct {
-	Key  KeyCode
-	Rune rune
-	Ctrl bool
-	Alt  bool
+	Key   KeyCode
+	Rune  rune
+	Ctrl  bool
+	Alt   bool
+	Shift bool
 }
 
 type ClickEvent struct {
@@ -94,6 +95,30 @@ type App struct {
 	started      bool
 
 	postChannel chan func()
+
+	// Hardware cursor state. cursorVisible/X/Y is the desired state; the front*
+	// fields track what was last emitted so Apply only writes cursor escapes on
+	// change.
+	cursorVisible      bool
+	cursorX            int
+	cursorY            int
+	frontCursorVisible bool
+	frontCursorX       int
+	frontCursorY       int
+}
+
+// SetCursor positions the real terminal cursor and makes it visible. Widgets use
+// it so the blinking hardware cursor marks the text insertion point instead of a
+// painted block that would hide the character underneath.
+func (a *App) SetCursor(x int, y int) {
+	a.cursorVisible = true
+	a.cursorX = x
+	a.cursorY = y
+}
+
+// HideCursor hides the hardware cursor (the default while no input is focused).
+func (a *App) HideCursor() {
+	a.cursorVisible = false
 }
 
 func New() (*App, error) {
@@ -267,6 +292,7 @@ func (a *App) invalidateFront() {
 	for index := range a.front.cells {
 		a.front.cells[index] = Cell{}
 	}
+	a.frontCursorVisible = false
 }
 
 func (a *App) Apply() error {
@@ -304,11 +330,31 @@ func (a *App) Apply() error {
 			a.front.cells[index] = next
 		}
 	}
+	output.WriteString(a.cursorEscapes())
 	if output.Len() == 0 {
 		return nil
 	}
 	_, err := io.WriteString(a.out, output.String())
 	return err
+}
+
+// cursorEscapes returns the control sequence needed to bring the real terminal
+// cursor in line with the desired state, or "" when nothing changed.
+func (a *App) cursorEscapes() string {
+	if a.cursorVisible {
+		if a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
+			return ""
+		}
+		a.frontCursorVisible = true
+		a.frontCursorX = a.cursorX
+		a.frontCursorY = a.cursorY
+		return moveCursor(a.cursorX, a.cursorY) + "\x1b[?25h"
+	}
+	if !a.frontCursorVisible {
+		return ""
+	}
+	a.frontCursorVisible = false
+	return "\x1b[?25l"
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -581,6 +627,13 @@ func parseEscape(data []byte) (any, int, bool) {
 	if len(data) == 1 {
 		return nil, 0, false
 	}
+	if data[1] == 'O' {
+		event := parseSS3(data)
+		if event == nil {
+			return nil, 0, false
+		}
+		return event, 3, true
+	}
 	if data[1] != '[' {
 		if utf8.FullRune(data[1:]) {
 			r, size := utf8.DecodeRune(data[1:])
@@ -608,7 +661,52 @@ func parseEscape(data []byte) (any, int, bool) {
 }
 
 func parseCSI(params string, final byte) any {
+	shift, alt, ctrl := parseCSIModifiers(params)
 	switch final {
+	case 'A':
+		return TypeEvent{Key: KeyUp, Shift: shift, Alt: alt, Ctrl: ctrl}
+	case 'B':
+		return TypeEvent{Key: KeyDown, Shift: shift, Alt: alt, Ctrl: ctrl}
+	case 'C':
+		return TypeEvent{Key: KeyRight, Shift: shift, Alt: alt, Ctrl: ctrl}
+	case 'D':
+		return TypeEvent{Key: KeyLeft, Shift: shift, Alt: alt, Ctrl: ctrl}
+	case 'Z':
+		return TypeEvent{Key: KeyBackTab}
+	case 'u':
+		keyCode, mod := parseCSIU(params)
+		if keyCode == 13 {
+			shift, alt, ctrl := decodeCSIModifier(mod)
+			return TypeEvent{Key: KeyEnter, Shift: shift, Alt: alt, Ctrl: ctrl}
+		}
+	case '~':
+		value, mod := parseCSITilde(params)
+		shift, alt, ctrl := decodeCSIModifier(mod)
+		switch value {
+		case 1, 7:
+			return TypeEvent{Key: KeyHome, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 2:
+			return TypeEvent{Key: KeyInsert, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 3:
+			return TypeEvent{Key: KeyDelete, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 4, 8:
+			return TypeEvent{Key: KeyEnd, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 5:
+			return TypeEvent{Key: KeyPageUp, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 6:
+			return TypeEvent{Key: KeyPageDown, Shift: shift, Alt: alt, Ctrl: ctrl}
+		}
+	case 'M', 'm':
+		return parseMouse(params, final)
+	}
+	return nil
+}
+
+func parseSS3(data []byte) any {
+	if len(data) < 3 {
+		return nil
+	}
+	switch data[2] {
 	case 'A':
 		return TypeEvent{Key: KeyUp}
 	case 'B':
@@ -617,28 +715,76 @@ func parseCSI(params string, final byte) any {
 		return TypeEvent{Key: KeyRight}
 	case 'D':
 		return TypeEvent{Key: KeyLeft}
-	case 'Z':
-		return TypeEvent{Key: KeyBackTab}
-	case '~':
-		value, _ := strconv.Atoi(params)
-		switch value {
-		case 1, 7:
-			return TypeEvent{Key: KeyHome}
-		case 2:
-			return TypeEvent{Key: KeyInsert}
-		case 3:
-			return TypeEvent{Key: KeyDelete}
-		case 4, 8:
-			return TypeEvent{Key: KeyEnd}
-		case 5:
-			return TypeEvent{Key: KeyPageUp}
-		case 6:
-			return TypeEvent{Key: KeyPageDown}
-		}
-	case 'M', 'm':
-		return parseMouse(params, final)
+	case 'H':
+		return TypeEvent{Key: KeyHome}
+	case 'F':
+		return TypeEvent{Key: KeyEnd}
 	}
 	return nil
+}
+
+func parseCSIModifiers(params string) (bool, bool, bool) {
+	if params == "" {
+		return false, false, false
+	}
+	parts := strings.Split(params, ";")
+	if len(parts) < 2 {
+		return false, false, false
+	}
+	mod, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return false, false, false
+	}
+	return decodeCSIModifier(mod)
+}
+
+func parseCSIU(params string) (int, int) {
+	parts := strings.Split(params, ";")
+	if len(parts) == 0 {
+		return 0, 1
+	}
+	keyCode, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 1
+	}
+	mod := 1
+	if len(parts) > 1 {
+		value, err := strconv.Atoi(parts[1])
+		if err == nil {
+			mod = value
+		}
+	}
+	return keyCode, mod
+}
+
+func parseCSITilde(params string) (int, int) {
+	parts := strings.Split(params, ";")
+	if len(parts) == 0 {
+		return 0, 1
+	}
+	keyCode, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 1
+	}
+	mod := 1
+	if len(parts) > 1 {
+		value, err := strconv.Atoi(parts[1])
+		if err == nil {
+			mod = value
+		}
+	}
+	return keyCode, mod
+}
+
+func decodeCSIModifier(mod int) (bool, bool, bool) {
+	if mod <= 1 {
+		return false, false, false
+	}
+	flags := mod - 1
+	shift := flags&1 != 0
+	alt := flags&2 != 0
+	ctrl := flags&4 != 0
+	return shift, alt, ctrl
 }
 
 func parseMouse(params string, final byte) any {

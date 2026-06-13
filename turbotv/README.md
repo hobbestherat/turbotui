@@ -73,8 +73,8 @@ func main() {
 | `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`, draggable, close button |
 | `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate |
 | `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget |
-| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText` |
-| `MultiLineInput`     | `NewMultiLineInput(text, bounds)`                      | Multi-line editor; `GetText` |
+| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter |
+| `MultiLineInput`     | `NewMultiLineInput(text, bounds)`                      | Multi-line editor; `GetText`; optional `OnSubmit` + `SubmitMode` |
 | `TextView`           | `NewTextView(text, bounds)`                            | Read-only, mouse-wheel scrollable; `SetText` |
 | `Select`             | `NewSelect(desktop, options, bounds)`                  | Drop-down combo; `Value`, `GetSelected`, `SetSelected`, `OnChange` |
 | `MenuBar`            | `NewMenuBar(bounds, menus...)`                         | See below |
@@ -83,6 +83,15 @@ func main() {
 All input widgets are focusable; `Tab`/`Shift+Tab` and arrow keys move focus
 within the top layer. State is read/written with explicit methods
 (`GetText()/SetText()`, `Value()/SetSelected()`) — there are no getters/setters.
+
+For action-style forms, inputs can submit directly:
+
+- `TextBox.OnSubmit` fires on Enter when set.
+- `MultiLineInput.OnSubmit` is controlled by `MultiLineInput.SubmitMode`:
+  - `MultiLineSubmitOnEnter` (default): Enter = submit, Shift+Enter = newline
+  - `MultiLineSubmitOnShiftEnter`: Shift+Enter = submit, Enter = newline
+  - `MultiLineSubmitOnCtrlEnter`: Ctrl+Enter = submit, Enter = newline
+- When `OnSubmit` is not set on `MultiLineInput`, Enter and Shift+Enter both insert new lines.
 
 ### Select (drop-down)
 

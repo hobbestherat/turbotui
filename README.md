@@ -4,7 +4,7 @@ A small, dependency-light terminal-UI toolkit for Go, in the spirit of classic
 Turbo Vision. It comes in two layers, both in this one module:
 
 - **`turbotui`** (package `tui`) — the low-level engine: a double-buffered cell
-  grid, an input parser (keyboard incl. Alt/Ctrl, mouse click/scroll, resize),
+  grid, an input parser (keyboard incl. Alt/Ctrl/Shift, mouse click/scroll, resize),
   box/line drawing, the alternate-screen lifecycle, and a `Run` event loop.
 - **`turbotui/turbotv`** (package `tv`) — a retained-mode widget toolkit built on
   top: a desktop with stacked layers, windows, a drop-down menu bar with
@@ -88,7 +88,7 @@ func main() {
   `app.Run(ctx)`. It enters the alternate screen, enables mouse reporting, and
   pumps input until `ctx` is cancelled.
 - **Input.** `TypeEvent` carries `Key` (a `KeyCode` such as `KeyEnter`,
-  `KeyUp`, `KeyRune`), `Rune`, and `Alt`/`Ctrl` modifiers. `ClickEvent` and
+  `KeyUp`, `KeyRune`), `Rune`, and `Alt`/`Ctrl`/`Shift` modifiers. `ClickEvent` and
   `ScrollEvent` carry `X`/`Y` and button/direction.
 - **Shutdown.** `app.Close()` tears the alternate screen down cleanly.
   `app.CloseWithMessage(msg)` does the same and then prints `msg` (multi-line and
