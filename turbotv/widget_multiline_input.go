@@ -16,6 +16,9 @@ type MultiLineInput struct {
 	BG        tui.Color
 	FocusFG   tui.Color
 	FocusBG   tui.Color
+	// OnSubmit, when set, fires on Ctrl+Enter (a submit) instead of inserting a
+	// newline; the Send button in the chat demo calls the same handler.
+	OnSubmit func()
 }
 
 type wrappedLineRow struct {
@@ -53,6 +56,20 @@ func (m *MultiLineInput) Root() *VisualComponent {
 
 func (m *MultiLineInput) GetText() string {
 	return strings.Join(m.Lines, "\n")
+}
+
+func (m *MultiLineInput) SetText(text string) {
+	m.Lines = strings.Split(text, "\n")
+	if len(m.Lines) == 0 {
+		m.Lines = []string{""}
+	}
+	m.CursorY = len(m.Lines) - 1
+	m.CursorX = len([]rune(m.Lines[m.CursorY]))
+	m.ScrollY = 0
+}
+
+func (m *MultiLineInput) Clear() {
+	m.SetText("")
 }
 
 func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
@@ -93,6 +110,10 @@ func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) boo
 		m.backspace()
 		return true
 	case tui.KeyEnter:
+		if event.Ctrl && m.OnSubmit != nil {
+			m.OnSubmit()
+			return true
+		}
 		m.newLine()
 		return true
 	case tui.KeyLeft:
