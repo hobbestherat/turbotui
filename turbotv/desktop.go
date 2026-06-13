@@ -119,7 +119,22 @@ func (d *Desktop) TopLayer() *Layer {
 
 func (d *Desktop) Redraw() {
 	d.compose()
+	d.updateCursor()
 	_ = d.app.Apply()
+}
+
+// updateCursor positions the real terminal cursor at the focused widget's text
+// caret (via its CursorFn), or hides it when no focused input exposes one or a
+// menu is open.
+func (d *Desktop) updateCursor() {
+	menuOpen := d.menuBar != nil && d.menuBar.IsOpen()
+	if !menuOpen && d.focused != nil && d.focused.Visible && d.focused.CursorFn != nil {
+		if x, y, ok := d.focused.CursorFn(d.focused); ok {
+			d.app.SetCursor(x, y)
+			return
+		}
+	}
+	d.app.HideCursor()
 }
 
 func (d *Desktop) compose() {
@@ -145,6 +160,7 @@ func (d *Desktop) compose() {
 
 func (d *Desktop) Run(ctx context.Context) error {
 	d.compose()
+	d.updateCursor()
 	return d.app.Run(ctx)
 }
 

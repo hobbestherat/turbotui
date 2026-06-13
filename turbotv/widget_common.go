@@ -11,18 +11,6 @@ func inputColors(focused bool, fg tui.Color, bg tui.Color, focusFG tui.Color, fo
 	return fg, bg
 }
 
-// cursorCell is the block cursor shared by the text input widgets. It inverts the
-// surrounding text colors so it stays visible on any theme.
-func cursorCell(fg tui.Color, bg tui.Color) tui.Cell {
-	return tui.Cell{
-		Ch:        '█',
-		FG:        bg,
-		BG:        fg,
-		Bold:      true,
-		Underline: true,
-	}
-}
-
 // parseMnemonic strips the '&' mnemonic marker from a label and returns the clean
 // text plus the rune index that was marked (-1 when none). A literal '&' is
 // written as "&&".
@@ -69,7 +57,7 @@ func drawMnemonic(surface Surface, x int, y int, label string, style tui.Cell, h
 	if hot >= len(runes) {
 		return
 	}
-	surface.SetCell(x+hot, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: style.Bold})
+	surface.SetCell(x+hot, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
 }
 
 func unicodeLower(value rune) rune {
@@ -78,4 +66,3 @@ func unicodeLower(value rune) rune {
 	}
 	return value
 }
-

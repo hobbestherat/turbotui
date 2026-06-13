@@ -31,13 +31,17 @@ type VisualComponent struct {
 	Parent   *VisualComponent
 	Children []*VisualComponent
 
-	DrawFn        DrawFn
-	LayoutFn      LayoutFn
-	OnTypeFn      TypeHandlerFn
-	OnClickFn     ClickHandlerFn
-	OnScrollFn    ScrollHandlerFn
-	OnFocusFn     FocusHandlerFn
-	OnHitTestFn   HitTestFn
+	DrawFn      DrawFn
+	LayoutFn    LayoutFn
+	OnTypeFn    TypeHandlerFn
+	OnClickFn   ClickHandlerFn
+	OnScrollFn  ScrollHandlerFn
+	OnFocusFn   FocusHandlerFn
+	OnHitTestFn HitTestFn
+	// CursorFn, when set on a focused component, returns the absolute screen
+	// position of the text cursor so the desktop can place the real terminal
+	// cursor there (ok=false hides it).
+	CursorFn      func(component *VisualComponent) (int, int, bool)
 	Background    tui.Cell
 	UseBackground bool
 

@@ -6,6 +6,19 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
+type MultiLineSubmitMode uint8
+
+const (
+	// MultiLineSubmitOnEnter is the default: Enter submits (when OnSubmit is set)
+	// and Shift+Enter inserts a newline.
+	MultiLineSubmitOnEnter MultiLineSubmitMode = iota
+	// MultiLineSubmitOnShiftEnter swaps that: Shift+Enter submits, Enter inserts a
+	// newline.
+	MultiLineSubmitOnShiftEnter
+	// MultiLineSubmitOnCtrlEnter submits on Ctrl+Enter and keeps Enter for newline.
+	MultiLineSubmitOnCtrlEnter
+)
+
 type MultiLineInput struct {
 	Component *VisualComponent
 	Lines     []string
@@ -16,9 +29,9 @@ type MultiLineInput struct {
 	BG        tui.Color
 	FocusFG   tui.Color
 	FocusBG   tui.Color
-	// OnSubmit, when set, fires on Ctrl+Enter (a submit) instead of inserting a
-	// newline; the Send button in the chat demo calls the same handler.
-	OnSubmit func()
+	// OnSubmit, when set, fires according to SubmitMode.
+	OnSubmit   func()
+	SubmitMode MultiLineSubmitMode
 }
 
 type wrappedLineRow struct {
@@ -33,13 +46,14 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 		lines = []string{""}
 	}
 	input := &MultiLineInput{
-		Lines:   lines,
-		CursorX: len([]rune(lines[len(lines)-1])),
-		CursorY: len(lines) - 1,
-		FG:      DefaultTheme.InputFG,
-		BG:      DefaultTheme.InputBG,
-		FocusFG: DefaultTheme.InputFocusFG,
-		FocusBG: DefaultTheme.InputFocusBG,
+		Lines:      lines,
+		CursorX:    len([]rune(lines[len(lines)-1])),
+		CursorY:    len(lines) - 1,
+		FG:         DefaultTheme.InputFG,
+		BG:         DefaultTheme.InputBG,
+		FocusFG:    DefaultTheme.InputFocusFG,
+		FocusBG:    DefaultTheme.InputFocusBG,
+		SubmitMode: MultiLineSubmitOnEnter,
 	}
 	input.Component = NewComponent(bounds)
 	input.Component.Focusable = true
@@ -47,6 +61,7 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 	input.Component.OnTypeFn = input.handleType
 	input.Component.OnScrollFn = input.handleScroll
 	input.Component.OnClickFn = input.handleClick
+	input.Component.CursorFn = input.cursorPos
 	return input
 }
 
@@ -91,17 +106,26 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 		}
 	}
 	if component.HasFocus {
-		cursorVisualY, cursorVisualX := m.cursorVisualPos(abs.W)
-		cursorY := cursorVisualY - m.ScrollY
-		if cursorY >= 0 && cursorY < abs.H {
-			if cursorVisualX >= abs.W {
-				cursorVisualX = abs.W - 1
-			}
-			if cursorVisualX >= 0 {
-				surface.SetCell(abs.X+cursorVisualX, abs.Y+cursorY, cursorCell(fg, bg))
-			}
-		}
+		m.ensureScroll(abs.H, abs.W)
 	}
+}
+
+// cursorPos reports the absolute caret position for the hardware cursor.
+func (m *MultiLineInput) cursorPos(component *VisualComponent) (int, int, bool) {
+	abs := component.AbsoluteBounds()
+	m.ensureScroll(abs.H, abs.W)
+	cursorVisualY, cursorVisualX := m.cursorVisualPos(abs.W)
+	cursorY := cursorVisualY - m.ScrollY
+	if cursorY < 0 || cursorY >= abs.H {
+		return 0, 0, false
+	}
+	if cursorVisualX >= abs.W {
+		cursorVisualX = abs.W - 1
+	}
+	if cursorVisualX < 0 {
+		return 0, 0, false
+	}
+	return abs.X + cursorVisualX, abs.Y + cursorY, true
 }
 
 func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
@@ -110,7 +134,11 @@ func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) boo
 		m.backspace()
 		return true
 	case tui.KeyEnter:
-		if event.Ctrl && m.OnSubmit != nil {
+		if m.OnSubmit == nil {
+			m.newLine()
+			return true
+		}
+		if m.shouldSubmit(event) {
 			m.OnSubmit()
 			return true
 		}
@@ -287,6 +315,17 @@ func (m *MultiLineInput) wrappedRows(width int) []wrappedLineRow {
 		rows = append(rows, wrappedLineRow{line: 0, start: 0, runes: []rune{}})
 	}
 	return rows
+}
+
+func (m *MultiLineInput) shouldSubmit(event tui.TypeEvent) bool {
+	switch m.SubmitMode {
+	case MultiLineSubmitOnEnter:
+		return !event.Shift
+	case MultiLineSubmitOnCtrlEnter:
+		return event.Ctrl
+	default:
+		return event.Shift
+	}
 }
 
 func (m *MultiLineInput) totalVisualRows(width int) int {

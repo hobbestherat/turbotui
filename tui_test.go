@@ -110,3 +110,28 @@ func TestParseAltRuneSequence(t *testing.T) {
 		t.Fatalf("unexpected alt type event: %#v", typeEvent)
 	}
 }
+
+func TestParseSS3ArrowSequence(t *testing.T) {
+	event, consumed, ok := parseEscape([]byte{0x1b, 'O', 'B'})
+	if !ok || consumed != 3 {
+		t.Fatalf("expected parsed ss3 arrow, ok=%v consumed=%d", ok, consumed)
+	}
+	typeEvent, cast := event.(TypeEvent)
+	if !cast {
+		t.Fatalf("expected type event")
+	}
+	if typeEvent.Key != KeyDown {
+		t.Fatalf("expected KeyDown from SS3 B, got %#v", typeEvent)
+	}
+}
+
+func TestParseCSIUShiftEnter(t *testing.T) {
+	event := parseCSI("13;2", 'u')
+	typeEvent, cast := event.(TypeEvent)
+	if !cast {
+		t.Fatalf("expected type event")
+	}
+	if typeEvent.Key != KeyEnter || !typeEvent.Shift {
+		t.Fatalf("expected Shift+Enter, got %#v", typeEvent)
+	}
+}

@@ -68,9 +68,10 @@ type TextView struct {
 	FocusFG   tui.Color
 	Wrap      bool
 
-	entries []*TextEntry
-	scrollY int
-	follow  bool
+	entries       []*TextEntry
+	scrollY       int
+	follow        bool
+	draggingThumb bool
 }
 
 func NewTextView(text string, bounds Rect) *TextView {
@@ -263,10 +264,18 @@ func (t *TextView) drawScrollbar(surface Surface, abs Rect, focused bool, total 
 }
 
 func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
+	abs := component.AbsoluteBounds()
+	// A release ends any in-progress thumb drag.
 	if !event.Down {
+		t.draggingThumb = false
 		return true
 	}
-	abs := component.AbsoluteBounds()
+	// While dragging the thumb, every motion event maps the pointer Y to scroll,
+	// even if the pointer drifts off the 1-column track.
+	if t.draggingThumb {
+		t.scrollToThumb(abs, event.Y)
+		return true
+	}
 	if abs.W > 1 && event.X == abs.Right() {
 		if event.Y == abs.Y {
 			t.scrollBy(-1)
@@ -274,6 +283,12 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		}
 		if event.Y == abs.Bottom() {
 			t.scrollBy(1)
+			return true
+		}
+		// Anywhere on the track between the arrows grabs the thumb and starts a drag.
+		if event.Y > abs.Y && event.Y < abs.Bottom() {
+			t.draggingThumb = true
+			t.scrollToThumb(abs, event.Y)
 			return true
 		}
 	}
@@ -292,6 +307,40 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		}
 	}
 	return false
+}
+
+// scrollToThumb maps a Y coordinate on the scrollbar track to a scroll offset.
+func (t *TextView) scrollToThumb(abs Rect, y int) {
+	track := abs.H - 2
+	if track < 1 {
+		return
+	}
+	textWidth := abs.W - 1
+	if textWidth < 1 {
+		textWidth = abs.W
+	}
+	span := len(t.layoutRows(textWidth)) - abs.H
+	if span <= 0 {
+		return
+	}
+	pos := y - (abs.Y + 1)
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > track-1 {
+		pos = track - 1
+	}
+	denom := track - 1
+	if denom < 1 {
+		denom = 1
+	}
+	t.scrollY = pos * span / denom
+	if t.scrollY >= span {
+		t.scrollY = span
+		t.follow = true
+	} else {
+		t.follow = false
+	}
 }
 
 func (t *TextView) handleScroll(_ *VisualComponent, event tui.ScrollEvent) bool {
