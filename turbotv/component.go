@@ -43,7 +43,11 @@ type VisualComponent struct {
 	// CursorFn, when set on a focused component, returns the absolute screen
 	// position of the text cursor so the desktop can place the real terminal
 	// cursor there (ok=false hides it).
-	CursorFn      func(component *VisualComponent) (int, int, bool)
+	CursorFn func(component *VisualComponent) (int, int, bool)
+	// CopyFn, when set, returns the text the component would copy to the clipboard
+	// (a selection, or all of its content) and whether there is anything to copy.
+	// The desktop calls it on Ctrl+C / Ctrl+Shift+C for the focused component.
+	CopyFn        func(component *VisualComponent) (string, bool)
 	Background    tui.Cell
 	UseBackground bool
 

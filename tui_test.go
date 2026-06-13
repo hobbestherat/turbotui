@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -177,5 +178,27 @@ func TestBracketedPasteWithEmbeddedEscapes(t *testing.T) {
 	paste := event.(PasteEvent)
 	if paste.Text != "a\x1b[Bb" {
 		t.Fatalf("expected embedded sequence kept literal, got %q", paste.Text)
+	}
+}
+
+func TestParseCSIUCtrlShiftLetter(t *testing.T) {
+	// Ctrl+Shift+C reported as CSI-u: keyCode 99 ('c'), modifier 6 (ctrl+shift).
+	event := parseCSI("99;6", 'u')
+	typeEvent, cast := event.(TypeEvent)
+	if !cast {
+		t.Fatalf("expected type event, got %T", event)
+	}
+	if typeEvent.Key != KeyRune || typeEvent.Rune != 'c' || !typeEvent.Ctrl || !typeEvent.Shift {
+		t.Fatalf("expected Ctrl+Shift+c rune, got %#v", typeEvent)
+	}
+}
+
+func TestCopyToClipboardWritesOSC52(t *testing.T) {
+	var buf bytes.Buffer
+	app := NewWithSize(20, 5, &buf)
+	app.CopyToClipboard("hi")
+	encoded := base64.StdEncoding.EncodeToString([]byte("hi"))
+	if !bytes.Contains(buf.Bytes(), []byte("\x1b]52;c;"+encoded)) {
+		t.Fatalf("expected OSC 52 sequence in output, got %q", buf.String())
 	}
 }

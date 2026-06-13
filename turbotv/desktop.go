@@ -14,6 +14,7 @@ type Desktop struct {
 	focused        *VisualComponent
 	mouseCapture   *VisualComponent
 	menuBar        *MenuBar
+	unhandledKeyFn func(event tui.TypeEvent)
 }
 
 func NewDesktop(app *tui.App) *Desktop {
@@ -240,6 +241,12 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			return
 		}
 	}
+	// Ctrl+C / Ctrl+Shift+C copies the focused widget's selection (or all of its
+	// content) and is consumed only when there was something to copy, so it can
+	// still fall through to an app quit handler otherwise.
+	if isCopyKey(event) && d.copyFocused() {
+		return
+	}
 	if d.focused != nil {
 		if d.focused.BubbleType(event) {
 			d.Redraw()
@@ -261,6 +268,35 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			return
 		}
 	}
+	if d.unhandledKeyFn != nil {
+		d.unhandledKeyFn(event)
+	}
+}
+
+// SetUnhandledKeyFn registers a callback invoked when a key event was not
+// consumed by the menu, focus navigation, copy, or the focused widget. Apps use
+// it for global shortcuts (e.g. a Ctrl+C quit confirmation) without racing the
+// widgets that might legitimately want the same key.
+func (d *Desktop) SetUnhandledKeyFn(fn func(event tui.TypeEvent)) {
+	d.unhandledKeyFn = fn
+}
+
+func isCopyKey(event tui.TypeEvent) bool {
+	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'c'
+}
+
+// copyFocused copies the focused component's CopyFn text to the clipboard,
+// returning true when something was copied.
+func (d *Desktop) copyFocused() bool {
+	if d.focused == nil || d.focused.CopyFn == nil {
+		return false
+	}
+	text, ok := d.focused.CopyFn(d.focused)
+	if !ok {
+		return false
+	}
+	d.app.CopyToClipboard(text)
+	return true
 }
 
 // handlePaste routes a bracketed-paste block to the focused widget as literal

@@ -725,9 +725,14 @@ func parseCSI(params string, final byte) any {
 		return TypeEvent{Key: KeyBackTab}
 	case 'u':
 		keyCode, mod := parseCSIU(params)
+		shift, alt, ctrl := decodeCSIModifier(mod)
 		if keyCode == 13 {
-			shift, alt, ctrl := decodeCSIModifier(mod)
 			return TypeEvent{Key: KeyEnter, Shift: shift, Alt: alt, Ctrl: ctrl}
+		}
+		// Modified printable keys (e.g. Ctrl+Shift+C) arrive as CSI-u when the
+		// terminal reports them; surface them as rune events.
+		if keyCode > 0x20 && keyCode != 0x7f {
+			return TypeEvent{Key: KeyRune, Rune: rune(keyCode), Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
 	case '~':
 		value, mod := parseCSITilde(params)

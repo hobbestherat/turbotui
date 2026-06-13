@@ -87,8 +87,33 @@ func NewTextView(text string, bounds Rect) *TextView {
 	view.Component.OnTypeFn = view.handleType
 	view.Component.OnScrollFn = view.handleScroll
 	view.Component.OnClickFn = view.handleClick
+	view.Component.CopyFn = view.copyAll
 	view.SetText(text)
 	return view
+}
+
+// AllText returns the full logical content, one entry per line, including the
+// children of foldable entries regardless of whether they are collapsed.
+func (t *TextView) AllText() string {
+	var builder strings.Builder
+	for _, entry := range t.entries {
+		entry.appendAllText(&builder)
+	}
+	return strings.TrimRight(builder.String(), "\n")
+}
+
+func (e *TextEntry) appendAllText(builder *strings.Builder) {
+	builder.WriteString(e.text)
+	builder.WriteByte('\n')
+	for _, child := range e.children {
+		child.appendAllText(builder)
+	}
+}
+
+// copyAll is the CopyFn: a focused TextView copies its whole content.
+func (t *TextView) copyAll(_ *VisualComponent) (string, bool) {
+	text := t.AllText()
+	return text, text != ""
 }
 
 func (t *TextView) Root() *VisualComponent {
