@@ -41,6 +41,18 @@ func (d *Desktop) App() *tui.App {
 	return d.app
 }
 
+// Post runs fn on the event-loop goroutine and then redraws. Background tasks use
+// it to safely update widgets (e.g. streaming text) and refresh the screen.
+func (d *Desktop) Post(fn func()) {
+	if fn == nil {
+		return
+	}
+	d.app.Post(func() {
+		fn()
+		d.Redraw()
+	})
+}
+
 func (d *Desktop) Theme() Theme {
 	return d.theme
 }
