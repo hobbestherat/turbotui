@@ -92,6 +92,8 @@ type App struct {
 	restoreState *term.State
 	parser       inputParser
 	started      bool
+
+	postChannel chan func()
 }
 
 func New() (*App, error) {
@@ -118,12 +120,13 @@ func NewWithSize(width int, height int, out io.Writer) *App {
 		height = 1
 	}
 	app := &App{
-		out:    out,
-		width:  width,
-		height: height,
-		front:  newScreen(width, height, Cell{}),
-		back:   newScreen(width, height, DefaultCell()),
-		lines:  make([]lineCell, width*height),
+		out:         out,
+		width:       width,
+		height:      height,
+		front:       newScreen(width, height, Cell{}),
+		back:        newScreen(width, height, DefaultCell()),
+		lines:       make([]lineCell, width*height),
+		postChannel: make(chan func(), 64),
 	}
 	app.invalidateFront()
 	return app
@@ -151,6 +154,16 @@ func (a *App) OnScroll(handler func(ScrollEvent)) {
 
 func (a *App) OnType(handler func(TypeEvent)) {
 	a.typeHandlers = append(a.typeHandlers, handler)
+}
+
+// Post schedules fn to run on the event-loop goroutine. It is safe to call from
+// any goroutine, which makes it the way to mutate UI state from a background
+// task (timers, network calls, …) and then trigger a redraw.
+func (a *App) Post(fn func()) {
+	if fn == nil {
+		return
+	}
+	a.postChannel <- fn
 }
 
 func (a *App) OnResize(handler func(ResizeEvent)) {
@@ -346,6 +359,8 @@ func (a *App) Run(ctx context.Context) error {
 			for _, event := range a.parser.flushLoneEscape() {
 				a.dispatchEvent(event)
 			}
+		case fn := <-a.postChannel:
+			fn()
 		case <-resizeChannel:
 			a.handleTerminalResize()
 		}
@@ -534,8 +549,13 @@ func parseOneInput(data []byte) (any, int, bool) {
 	if head == 0x7f {
 		return TypeEvent{Key: KeyBackspace}, 1, true
 	}
-	if head == '\r' || head == '\n' {
+	if head == '\r' {
 		return TypeEvent{Key: KeyEnter}, 1, true
+	}
+	// LF (^J) is what most terminals send for Ctrl+Enter; surface it as a
+	// Ctrl-modified Enter so apps can use it as a "submit" key.
+	if head == '\n' {
+		return TypeEvent{Key: KeyEnter, Ctrl: true}, 1, true
 	}
 	if head == '\t' {
 		return TypeEvent{Key: KeyTab}, 1, true
