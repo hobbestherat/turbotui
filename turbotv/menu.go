@@ -109,6 +109,9 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 		style := tui.Cell{FG: m.FG, BG: m.BG}
 		if selected {
 			style = tui.Cell{FG: m.SelectFG, BG: m.SelectBG, Bold: true}
+			// Paint the whole rect (text plus one padding cell each side) so the
+			// highlight reads as a solid block, not just the letters.
+			surface.Fill(rect, tui.Cell{Ch: ' ', FG: style.FG, BG: style.BG})
 		}
 		drawMnemonic(surface, rect.X+1, rect.Y, item.Label, style, highlight, m.HotFG)
 	}
@@ -130,6 +133,9 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 			if !item.Enabled {
 				style.FG = tui.ANSIColor(8)
 			}
+			// Fill the full row so the selection highlight runs edge to edge with
+			// no gap between the label and the shortcut hint.
+			surface.Fill(lineRect, tui.Cell{Ch: ' ', FG: style.FG, BG: style.BG})
 			drawMnemonic(surface, lineRect.X+1, lineRect.Y, item.Label, style, item.Enabled, m.HotFG)
 			if item.Shortcut != nil && item.Shortcut.Display != "" {
 				shortX := lineRect.Right() - len([]rune(item.Shortcut.Display)) - 1
