@@ -55,5 +55,5 @@ var DefaultTheme = Theme{
 	InputFocusFG:   tui.ANSIColor(0),
 	CloseButtonBG:  tui.ANSIColor(1),
 	CloseButtonFG:  tui.ANSIColor(15),
-	MnemonicFG:     tui.ANSIColor(11),
+	MnemonicFG:     tui.ANSIColor(9),
 }
