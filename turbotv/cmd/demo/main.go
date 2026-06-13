@@ -108,9 +108,21 @@ func main() {
 	window.AddBottom(status)
 	desktop.AddLayer(tv.NewWindowLayer("window", window))
 
+	// Ctrl+C asks before quitting (in raw mode it arrives as a key event, not a
+	// signal). Plain 'q' no longer quits, so it can be typed into the fields.
+	quitting := false
 	app.OnType(func(event tui.TypeEvent) {
-		if event.Key == tui.KeyRune && event.Rune == 'q' && !event.Ctrl && !event.Alt {
-			stop()
+		if event.Key == tui.KeyRune && event.Rune == 'c' && event.Ctrl {
+			if quitting {
+				return
+			}
+			quitting = true
+			tv.ShowConfirmYesNo(desktop, "Quit", "Quit the demo?", func(yes bool) {
+				quitting = false
+				if yes {
+					stop()
+				}
+			})
 		}
 	})
 
