@@ -109,10 +109,11 @@ func main() {
 	desktop.AddLayer(tv.NewWindowLayer("window", window))
 
 	// Ctrl+C asks before quitting (in raw mode it arrives as a key event, not a
-	// signal). Plain 'q' no longer quits, so it can be typed into the fields.
+	// signal). It runs only when no widget consumed the key (e.g. as a copy), so
+	// copying from a focused field still works. Plain 'q' no longer quits.
 	quitting := false
-	app.OnType(func(event tui.TypeEvent) {
-		if event.Key == tui.KeyRune && event.Rune == 'c' && event.Ctrl {
+	desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
+		if event.Key == tui.KeyRune && (event.Rune == 'c' || event.Rune == 'C') && event.Ctrl {
 			if quitting {
 				return
 			}

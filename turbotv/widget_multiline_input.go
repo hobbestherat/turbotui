@@ -32,6 +32,10 @@ type MultiLineInput struct {
 	// OnSubmit, when set, fires according to SubmitMode.
 	OnSubmit   func()
 	SubmitMode MultiLineSubmitMode
+
+	selAnchorX int
+	selAnchorY int // -1 when there is no selection
+	selecting  bool
 }
 
 type wrappedLineRow struct {
@@ -54,6 +58,7 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 		FocusFG:    DefaultTheme.InputFocusFG,
 		FocusBG:    DefaultTheme.InputFocusBG,
 		SubmitMode: MultiLineSubmitOnEnter,
+		selAnchorY: -1,
 	}
 	input.Component = NewComponent(bounds)
 	input.Component.Focusable = true
@@ -63,6 +68,7 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 	input.Component.OnScrollFn = input.handleScroll
 	input.Component.OnClickFn = input.handleClick
 	input.Component.CursorFn = input.cursorPos
+	input.Component.CopyFn = input.copySelection
 	return input
 }
 
@@ -82,6 +88,7 @@ func (m *MultiLineInput) SetText(text string) {
 	m.CursorY = len(m.Lines) - 1
 	m.CursorX = len([]rune(m.Lines[m.CursorY]))
 	m.ScrollY = 0
+	m.selAnchorY = -1
 }
 
 func (m *MultiLineInput) Clear() {
@@ -102,8 +109,13 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 		}
 		wrapped := rows[rowIndex]
 		for col := 0; col < abs.W && col < len(wrapped.runes); col++ {
-			style.Ch = wrapped.runes[col]
-			surface.SetCell(abs.X+col, abs.Y+row, style)
+			cell := style
+			cell.Ch = wrapped.runes[col]
+			if m.isSelected(wrapped.line, wrapped.start+col) {
+				cell.FG = DefaultTheme.SelectionFG
+				cell.BG = DefaultTheme.SelectionBG
+			}
+			surface.SetCell(abs.X+col, abs.Y+row, cell)
 		}
 	}
 	if component.HasFocus {
@@ -132,37 +144,160 @@ func (m *MultiLineInput) cursorPos(component *VisualComponent) (int, int, bool) 
 func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	switch event.Key {
 	case tui.KeyBackspace:
-		m.backspace()
-		return true
-	case tui.KeyEnter:
-		if m.OnSubmit == nil {
-			m.newLine()
+		if m.deleteSelection() {
 			return true
 		}
-		if m.shouldSubmit(event) {
+		m.backspace()
+		return true
+	case tui.KeyDelete:
+		if m.deleteSelection() {
+			return true
+		}
+		m.forwardDelete()
+		return true
+	case tui.KeyEnter:
+		if m.OnSubmit != nil && m.shouldSubmit(event) {
 			m.OnSubmit()
 			return true
 		}
+		m.deleteSelection()
 		m.newLine()
 		return true
 	case tui.KeyLeft:
+		m.extendOrClear(event.Shift)
 		m.moveLeft()
 		return true
 	case tui.KeyRight:
+		m.extendOrClear(event.Shift)
 		m.moveRight()
 		return true
 	case tui.KeyUp:
+		m.extendOrClear(event.Shift)
 		m.moveUp(m.Component.Bounds.W)
 		return true
 	case tui.KeyDown:
+		m.extendOrClear(event.Shift)
 		m.moveDown(m.Component.Bounds.W)
+		return true
+	case tui.KeyHome:
+		m.extendOrClear(event.Shift)
+		m.CursorX = 0
+		return true
+	case tui.KeyEnd:
+		m.extendOrClear(event.Shift)
+		m.CursorX = len([]rune(m.Lines[m.CursorY]))
 		return true
 	}
 	if event.Key != tui.KeyRune || event.Ctrl {
 		return false
 	}
+	m.deleteSelection()
 	m.insertRune(event.Rune)
 	return true
+}
+
+// extendOrClear starts/keeps the selection anchor when extend is true (shift held)
+// or clears the selection otherwise, before the caller moves the cursor.
+func (m *MultiLineInput) extendOrClear(extend bool) {
+	if extend {
+		if m.selAnchorY < 0 {
+			m.selAnchorX = m.CursorX
+			m.selAnchorY = m.CursorY
+		}
+		return
+	}
+	m.selAnchorY = -1
+}
+
+func (m *MultiLineInput) hasSelection() bool {
+	return m.selAnchorY >= 0 && (m.selAnchorY != m.CursorY || m.selAnchorX != m.CursorX)
+}
+
+func (m *MultiLineInput) selectionOrdered() (int, int, int, int) {
+	ay, ax, cy, cx := m.selAnchorY, m.selAnchorX, m.CursorY, m.CursorX
+	if ay > cy || (ay == cy && ax > cx) {
+		ay, ax, cy, cx = cy, cx, ay, ax
+	}
+	return ay, ax, cy, cx
+}
+
+func (m *MultiLineInput) isSelected(line int, col int) bool {
+	if !m.hasSelection() {
+		return false
+	}
+	y0, x0, y1, x1 := m.selectionOrdered()
+	if line < y0 || line > y1 {
+		return false
+	}
+	if y0 == y1 {
+		return col >= x0 && col < x1
+	}
+	if line == y0 {
+		return col >= x0
+	}
+	if line == y1 {
+		return col < x1
+	}
+	return true
+}
+
+func (m *MultiLineInput) selectionText() string {
+	if !m.hasSelection() {
+		return ""
+	}
+	y0, x0, y1, x1 := m.selectionOrdered()
+	if y0 == y1 {
+		runes := []rune(m.Lines[y0])
+		return string(runes[x0:x1])
+	}
+	var builder strings.Builder
+	first := []rune(m.Lines[y0])
+	builder.WriteString(string(first[x0:]))
+	builder.WriteByte('\n')
+	for line := y0 + 1; line < y1; line++ {
+		builder.WriteString(m.Lines[line])
+		builder.WriteByte('\n')
+	}
+	last := []rune(m.Lines[y1])
+	builder.WriteString(string(last[:x1]))
+	return builder.String()
+}
+
+func (m *MultiLineInput) deleteSelection() bool {
+	if !m.hasSelection() {
+		return false
+	}
+	y0, x0, y1, x1 := m.selectionOrdered()
+	first := []rune(m.Lines[y0])
+	last := []rune(m.Lines[y1])
+	merged := string(first[:x0]) + string(last[x1:])
+	newLines := append([]string{}, m.Lines[:y0]...)
+	newLines = append(newLines, merged)
+	newLines = append(newLines, m.Lines[y1+1:]...)
+	m.Lines = newLines
+	m.CursorY = y0
+	m.CursorX = x0
+	m.selAnchorY = -1
+	return true
+}
+
+func (m *MultiLineInput) forwardDelete() {
+	line := []rune(m.Lines[m.CursorY])
+	if m.CursorX < len(line) {
+		line = append(line[:m.CursorX], line[m.CursorX+1:]...)
+		m.Lines[m.CursorY] = string(line)
+		return
+	}
+	if m.CursorY >= len(m.Lines)-1 {
+		return
+	}
+	m.Lines[m.CursorY] = string(line) + m.Lines[m.CursorY+1]
+	m.Lines = append(m.Lines[:m.CursorY+1], m.Lines[m.CursorY+2:]...)
+}
+
+func (m *MultiLineInput) copySelection(_ *VisualComponent) (string, bool) {
+	text := m.selectionText()
+	return text, text != ""
 }
 
 func (m *MultiLineInput) handleScroll(_ *VisualComponent, event tui.ScrollEvent) bool {
@@ -189,9 +324,11 @@ func (m *MultiLineInput) insertRune(value rune) {
 	m.CursorX++
 }
 
-// handlePaste inserts pasted text at the cursor, splitting on newlines so a
-// multi-line paste spans multiple lines. CR is dropped so CRLF pastes behave.
+// handlePaste inserts pasted text at the cursor, replacing any selection and
+// splitting on newlines so a multi-line paste spans multiple lines. CR is
+// dropped so CRLF pastes behave.
 func (m *MultiLineInput) handlePaste(_ *VisualComponent, text string) bool {
+	m.deleteSelection()
 	for _, r := range text {
 		switch {
 		case r == '\r':
@@ -439,16 +576,32 @@ func (m *MultiLineInput) visualPosToCursor(width int, row int, col int) (int, in
 }
 
 func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
-	if !event.Down {
-		return true
-	}
 	abs := component.AbsoluteBounds()
-	if !abs.Contains(event.X, event.Y) {
-		return false
+	if !event.Down {
+		m.selecting = false
+		return true
 	}
 	row := m.ScrollY + (event.Y - abs.Y)
 	col := event.X - abs.X
+	if col < 0 {
+		col = 0
+	}
+	if row < 0 {
+		row = 0
+	}
 	line, cursor := m.visualPosToCursor(component.Bounds.W, row, col)
+	if !m.selecting {
+		if !abs.Contains(event.X, event.Y) {
+			return false
+		}
+		m.CursorY = line
+		m.CursorX = cursor
+		m.selAnchorX = cursor
+		m.selAnchorY = line
+		m.selecting = true
+		return true
+	}
+	// Drag motion: extend the selection to the pointer.
 	m.CursorY = line
 	m.CursorX = cursor
 	return true

@@ -34,3 +34,39 @@ func TestTextBoxPasteStripsNewlines(t *testing.T) {
 		t.Fatalf("expected newlines stripped, got %q", string(box.Text))
 	}
 }
+
+func TestTextBoxShiftSelectAndCopy(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.Cursor = 0
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	if !box.hasSelection() {
+		t.Fatalf("expected a selection after shift+right")
+	}
+	text, ok := box.copySelection(box.Component)
+	if !ok || text != "he" {
+		t.Fatalf("expected copy 'he', got %q ok=%v", text, ok)
+	}
+}
+
+func TestTextBoxTypingReplacesSelection(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.Cursor = 0
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+	if string(box.Text) != "Xllo" {
+		t.Fatalf("expected selection replaced, got %q", string(box.Text))
+	}
+}
+
+func TestTextBoxBackspaceDeletesSelection(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.Cursor = 1
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight, Shift: true})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyBackspace})
+	if string(box.Text) != "hlo" {
+		t.Fatalf("expected 'hlo' after deleting selection, got %q", string(box.Text))
+	}
+}

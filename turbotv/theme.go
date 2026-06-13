@@ -28,6 +28,8 @@ type Theme struct {
 	CloseButtonBG  tui.Color
 	CloseButtonFG  tui.Color
 	MnemonicFG     tui.Color
+	SelectionBG    tui.Color
+	SelectionFG    tui.Color
 }
 
 var DefaultTheme = Theme{
@@ -56,4 +58,6 @@ var DefaultTheme = Theme{
 	CloseButtonBG:  tui.ANSIColor(1),
 	CloseButtonFG:  tui.ANSIColor(15),
 	MnemonicFG:     tui.ANSIColor(9),
+	SelectionBG:    tui.ANSIColor(7),
+	SelectionFG:    tui.ANSIColor(0),
 }

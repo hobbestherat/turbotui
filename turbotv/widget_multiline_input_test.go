@@ -84,3 +84,29 @@ func TestMultiLineInputPasteSplitsLines(t *testing.T) {
 		t.Fatalf("unexpected pasted lines: %#v", input.Lines)
 	}
 }
+
+func TestMultiLineSelectionAcrossLinesCopy(t *testing.T) {
+	input := NewMultiLineInput("abc\ndef\nghi", Rect{X: 0, Y: 0, W: 40, H: 5})
+	input.CursorY, input.CursorX = 0, 1
+	input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyDown, Shift: true})
+	if !input.hasSelection() {
+		t.Fatalf("expected selection after shift+down")
+	}
+	text, ok := input.copySelection(input.Component)
+	if !ok || text != "bc\nd" {
+		t.Fatalf("expected copy 'bc\\nd', got %q ok=%v", text, ok)
+	}
+}
+
+func TestMultiLineDeleteSelectionMergesLines(t *testing.T) {
+	input := NewMultiLineInput("abc\ndef\nghi", Rect{X: 0, Y: 0, W: 40, H: 5})
+	input.CursorY, input.CursorX = 0, 1
+	input.selAnchorY, input.selAnchorX = 2, 1
+	input.handleType(input.Component, tui.TypeEvent{Key: tui.KeyBackspace})
+	if len(input.Lines) != 1 || input.Lines[0] != "ahi" {
+		t.Fatalf("expected merged 'ahi', got %#v", input.Lines)
+	}
+	if input.CursorY != 0 || input.CursorX != 1 {
+		t.Fatalf("expected cursor at (0,1), got (%d,%d)", input.CursorY, input.CursorX)
+	}
+}

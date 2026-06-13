@@ -92,6 +92,9 @@ func main() {
   `ScrollEvent` carry `X`/`Y` and button/direction. `PasteEvent` carries the
   literal `Text` of a bracketed paste (delivered as one block, so embedded
   newlines never look like Enter presses).
+- **Clipboard.** `app.CopyToClipboard(text)` writes the system clipboard via
+  OSC 52 (works over SSH and in most terminals) plus a best-effort native
+  fallback (`pbcopy`/`wl-copy`/`xclip`/`xsel`) for terminals that ignore OSC 52.
 - **Shutdown.** `app.Close()` tears the alternate screen down cleanly.
   `app.CloseWithMessage(msg)` does the same and then prints `msg` (multi-line and
   ANSI-coloured via `tui.Styled`) to the normal buffer — handy for printing run

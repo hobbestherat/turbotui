@@ -217,8 +217,8 @@ func main() {
 	desktop.SetFocus(input)
 
 	quitting := false
-	app.OnType(func(event tui.TypeEvent) {
-		if event.Key == tui.KeyRune && event.Rune == 'c' && event.Ctrl {
+	desktop.SetUnhandledKeyFn(func(event tui.TypeEvent) {
+		if event.Key == tui.KeyRune && (event.Rune == 'c' || event.Rune == 'C') && event.Ctrl {
 			if quitting {
 				return
 			}

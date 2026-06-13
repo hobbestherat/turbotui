@@ -101,9 +101,32 @@ and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
 `MultiLineInput` keeps them. To handle paste in a custom widget, set
 `Component.OnPasteFn` (or call `app.OnPaste(...)` at the engine level).
 
-Copying *out* uses the terminal's own selection: because mouse reporting is on,
-hold **Shift** (most Linux terminals) or **Option** (macOS Terminal / iTerm2)
-while selecting to bypass it and copy normally.
+### Selection and copy
+
+`TextBox` and `MultiLineInput` support text selection:
+
+- **Shift + arrows / Home / End** extend a selection; a plain move clears it.
+- **Mouse drag** selects; click clears.
+- Typing, **Backspace** or **Delete** replaces/removes the selection.
+- **Ctrl+C** (and **Ctrl+Shift+C** where the terminal forwards it) copies the
+  selection to the system clipboard.
+
+A focused `TextView` has no caret, so **Ctrl+C copies its entire content**
+(`TextView.AllText()`), including the children of folded entries — handy for
+grabbing a whole chat/log pane.
+
+Ctrl+C only copies when there is something to copy; otherwise it is left for the
+app (e.g. a quit confirmation) via `Desktop.SetUnhandledKeyFn`.
+
+Copy is written with **OSC 52** (reaches the clipboard through most terminals
+and over SSH) plus a best-effort native fallback (`pbcopy` / `wl-copy` /
+`xclip` / `xsel`) for terminals that ignore OSC 52, such as macOS Terminal.app
+when running locally. Call `app.CopyToClipboard(text)` directly for custom copy
+actions. To make a custom widget copyable, set `Component.CopyFn`.
+
+To copy with the *terminal's own* selection instead (e.g. to grab arbitrary
+on-screen text), hold **Shift** (most Linux terminals) or **Option** (macOS
+Terminal / iTerm2) while dragging to bypass the app's mouse reporting.
 
 ### Select (drop-down)
 
