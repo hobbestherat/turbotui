@@ -1,0 +1,42 @@
+package tv
+
+import (
+	"testing"
+
+	tui "github.com/hobbestherat/turbotui"
+)
+
+func TestMultiLineInputWrapsRows(t *testing.T) {
+	input := NewMultiLineInput("abcdef", Rect{X: 0, Y: 0, W: 4, H: 2})
+	rows := input.wrappedRows(4)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 wrapped rows, got %d", len(rows))
+	}
+	if string(rows[0].runes) != "abcd" {
+		t.Fatalf("unexpected first wrapped row: %q", string(rows[0].runes))
+	}
+	if string(rows[1].runes) != "ef" {
+		t.Fatalf("unexpected second wrapped row: %q", string(rows[1].runes))
+	}
+}
+
+func TestMultiLineInputUpDownUseWrappedRows(t *testing.T) {
+	input := NewMultiLineInput("abcdef", Rect{X: 0, Y: 0, W: 4, H: 2})
+	input.moveUp(4)
+	if input.CursorY != 0 || input.CursorX != 2 {
+		t.Fatalf("expected cursor to move to wrapped first row, got (%d,%d)", input.CursorY, input.CursorX)
+	}
+	input.moveDown(4)
+	if input.CursorY != 0 || input.CursorX != 6 {
+		t.Fatalf("expected cursor to move back to wrapped second row, got (%d,%d)", input.CursorY, input.CursorX)
+	}
+}
+
+func TestMultiLineInputClickSetsWrappedCursor(t *testing.T) {
+	input := NewMultiLineInput("abcdef", Rect{X: 0, Y: 0, W: 4, H: 2})
+	component := input.Component
+	_ = input.handleClick(component, tui.ClickEvent{X: 1, Y: 1, Down: true})
+	if input.CursorY != 0 || input.CursorX != 5 {
+		t.Fatalf("expected wrapped click cursor at (0,5), got (%d,%d)", input.CursorY, input.CursorX)
+	}
+}
