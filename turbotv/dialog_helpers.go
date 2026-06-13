@@ -1,5 +1,7 @@
 package tv
 
+import tui "github.com/hobbestherat/turbotui"
+
 func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult func(bool)) *Layer {
 	if desktop == nil {
 		return nil
@@ -38,7 +40,17 @@ func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult f
 	dialog.Window.AddContent(yes)
 	dialog.Window.AddContent(no)
 
+	// Escape anywhere in the dialog cancels it (counts as "No").
+	dialog.Root().OnTypeFn = func(_ *VisualComponent, event tui.TypeEvent) bool {
+		if event.Key == tui.KeyEscape {
+			closeDialog(false)
+			return true
+		}
+		return false
+	}
+
 	layer = NewModalLayer("confirm-dialog", dialog)
 	desktop.AddLayer(layer)
+	desktop.SetFocus(no)
 	return layer
 }

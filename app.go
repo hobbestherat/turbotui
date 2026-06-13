@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -319,6 +320,9 @@ func (a *App) Run(ctx context.Context) error {
 	signal.Notify(resizeChannel, syscall.SIGWINCH)
 	defer signal.Stop(resizeChannel)
 
+	// A lone ESC byte can't be parsed immediately: it might begin an escape
+	// sequence. We hold it briefly and, if nothing follows, flush it as KeyEscape.
+	var escTimer <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -330,6 +334,16 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		case bytes := <-readChannel:
 			for _, event := range a.parser.Feed(bytes) {
+				a.dispatchEvent(event)
+			}
+			if a.parser.pendingLoneEscape() {
+				escTimer = time.After(40 * time.Millisecond)
+			} else {
+				escTimer = nil
+			}
+		case <-escTimer:
+			escTimer = nil
+			for _, event := range a.parser.flushLoneEscape() {
 				a.dispatchEvent(event)
 			}
 		case <-resizeChannel:
@@ -491,6 +505,22 @@ func (p *inputParser) Feed(chunk []byte) []any {
 		p.pending = p.pending[:0]
 	}
 	return events
+}
+
+// pendingLoneEscape reports that the only buffered byte is ESC, which the parser
+// is holding back in case it begins an escape sequence.
+func (p *inputParser) pendingLoneEscape() bool {
+	return len(p.pending) == 1 && p.pending[0] == 0x1b
+}
+
+// flushLoneEscape resolves a held-back lone ESC as a KeyEscape event when no
+// follow-up bytes arrived in time.
+func (p *inputParser) flushLoneEscape() []any {
+	if !p.pendingLoneEscape() {
+		return nil
+	}
+	p.pending = p.pending[:0]
+	return []any{TypeEvent{Key: KeyEscape}}
 }
 
 func parseOneInput(data []byte) (any, int, bool) {
