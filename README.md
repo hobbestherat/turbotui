@@ -84,12 +84,14 @@ func main() {
 - **Double buffering.** Drawing calls (`WriteCell`, `WriteString`, `DrawBox`,
   `Clear`, …) mutate an off-screen buffer; `app.Apply()` diffs it against the
   visible frame and writes only what changed.
-- **Event loop.** Register `OnType`, `OnClick`, `OnScroll`, `OnResize`, then call
-  `app.Run(ctx)`. It enters the alternate screen, enables mouse reporting, and
-  pumps input until `ctx` is cancelled.
+- **Event loop.** Register `OnType`, `OnPaste`, `OnClick`, `OnScroll`, `OnResize`,
+  then call `app.Run(ctx)`. It enters the alternate screen, enables mouse
+  reporting and bracketed paste, and pumps input until `ctx` is cancelled.
 - **Input.** `TypeEvent` carries `Key` (a `KeyCode` such as `KeyEnter`,
   `KeyUp`, `KeyRune`), `Rune`, and `Alt`/`Ctrl`/`Shift` modifiers. `ClickEvent` and
-  `ScrollEvent` carry `X`/`Y` and button/direction.
+  `ScrollEvent` carry `X`/`Y` and button/direction. `PasteEvent` carries the
+  literal `Text` of a bracketed paste (delivered as one block, so embedded
+  newlines never look like Enter presses).
 - **Shutdown.** `app.Close()` tears the alternate screen down cleanly.
   `app.CloseWithMessage(msg)` does the same and then prints `msg` (multi-line and
   ANSI-coloured via `tui.Styled`) to the normal buffer — handy for printing run

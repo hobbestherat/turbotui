@@ -34,6 +34,9 @@ func NewDesktop(app *tui.App) *Desktop {
 	app.OnType(func(event tui.TypeEvent) {
 		desktop.handleType(event)
 	})
+	app.OnPaste(func(event tui.PasteEvent) {
+		desktop.handlePaste(event)
+	})
 	return desktop
 }
 
@@ -257,6 +260,20 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			d.Redraw()
 			return
 		}
+	}
+}
+
+// handlePaste routes a bracketed-paste block to the focused widget as literal
+// text. A dropped-down menu swallows it (paste makes no sense in a menu).
+func (d *Desktop) handlePaste(event tui.PasteEvent) {
+	if d.menuBar != nil && d.menuBar.IsOpen() {
+		return
+	}
+	if d.focused == nil {
+		return
+	}
+	if d.focused.BubblePaste(event.Text) {
+		d.Redraw()
 	}
 }
 

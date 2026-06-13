@@ -5,6 +5,7 @@ import tui "github.com/hobbestherat/turbotui"
 type DrawFn func(component *VisualComponent, surface Surface)
 type LayoutFn func(component *VisualComponent)
 type TypeHandlerFn func(component *VisualComponent, event tui.TypeEvent) bool
+type PasteHandlerFn func(component *VisualComponent, text string) bool
 type ClickHandlerFn func(component *VisualComponent, event tui.ClickEvent) bool
 type ScrollHandlerFn func(component *VisualComponent, event tui.ScrollEvent) bool
 type FocusHandlerFn func(component *VisualComponent, focused bool)
@@ -34,6 +35,7 @@ type VisualComponent struct {
 	DrawFn      DrawFn
 	LayoutFn    LayoutFn
 	OnTypeFn    TypeHandlerFn
+	OnPasteFn   PasteHandlerFn
 	OnClickFn   ClickHandlerFn
 	OnScrollFn  ScrollHandlerFn
 	OnFocusFn   FocusHandlerFn
@@ -174,6 +176,12 @@ func (c *VisualComponent) bubble(handle func(*VisualComponent) bool) bool {
 func (c *VisualComponent) BubbleType(event tui.TypeEvent) bool {
 	return c.bubble(func(v *VisualComponent) bool {
 		return v.OnTypeFn != nil && v.OnTypeFn(v, event)
+	})
+}
+
+func (c *VisualComponent) BubblePaste(text string) bool {
+	return c.bubble(func(v *VisualComponent) bool {
+		return v.OnPasteFn != nil && v.OnPasteFn(v, text)
 	})
 }
 

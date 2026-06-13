@@ -135,3 +135,47 @@ func TestParseCSIUShiftEnter(t *testing.T) {
 		t.Fatalf("expected Shift+Enter, got %#v", typeEvent)
 	}
 }
+
+func TestBracketedPasteSingleChunk(t *testing.T) {
+	data := []byte("\x1b[200~hello\nworld\x1b[201~")
+	event, consumed, ok := parseEscape(data)
+	if !ok || consumed != len(data) {
+		t.Fatalf("expected full paste consumed, ok=%v consumed=%d", ok, consumed)
+	}
+	paste, cast := event.(PasteEvent)
+	if !cast {
+		t.Fatalf("expected PasteEvent, got %T", event)
+	}
+	if paste.Text != "hello\nworld" {
+		t.Fatalf("unexpected paste text %q", paste.Text)
+	}
+}
+
+func TestBracketedPasteSplitAcrossReads(t *testing.T) {
+	var parser inputParser
+	events := parser.Feed([]byte("\x1b[200~par"))
+	if len(events) != 0 {
+		t.Fatalf("expected no events before terminator, got %d", len(events))
+	}
+	events = parser.Feed([]byte("tial\x1b[201~"))
+	if len(events) != 1 {
+		t.Fatalf("expected one paste event, got %d", len(events))
+	}
+	paste, cast := events[0].(PasteEvent)
+	if !cast || paste.Text != "partial" {
+		t.Fatalf("unexpected reassembled paste %#v", events[0])
+	}
+}
+
+func TestBracketedPasteWithEmbeddedEscapes(t *testing.T) {
+	// Pasted content that itself looks like control bytes must stay literal.
+	data := []byte("\x1b[200~a\x1b[Bb\x1b[201~")
+	event, _, ok := parseEscape(data)
+	if !ok {
+		t.Fatalf("expected paste parsed")
+	}
+	paste := event.(PasteEvent)
+	if paste.Text != "a\x1b[Bb" {
+		t.Fatalf("expected embedded sequence kept literal, got %q", paste.Text)
+	}
+}

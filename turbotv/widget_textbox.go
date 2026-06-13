@@ -27,6 +27,7 @@ func NewTextBox(text string, bounds Rect) *TextBox {
 	box.Component.Focusable = true
 	box.Component.DrawFn = box.draw
 	box.Component.OnTypeFn = box.handleType
+	box.Component.OnPasteFn = box.handlePaste
 	box.Component.OnClickFn = box.handleClick
 	box.Component.CursorFn = box.cursorPos
 	return box
@@ -109,10 +110,26 @@ func (t *TextBox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	if event.Key != tui.KeyRune || event.Ctrl {
 		return false
 	}
+	t.insertRune(event.Rune)
+	return true
+}
+
+func (t *TextBox) insertRune(value rune) {
 	t.Text = append(t.Text, 0)
 	copy(t.Text[t.Cursor+1:], t.Text[t.Cursor:])
-	t.Text[t.Cursor] = event.Rune
+	t.Text[t.Cursor] = value
 	t.Cursor++
+}
+
+// handlePaste inserts pasted text at the cursor. Newlines and other control
+// characters are dropped since a TextBox is single-line.
+func (t *TextBox) handlePaste(_ *VisualComponent, text string) bool {
+	for _, r := range text {
+		if r < 0x20 {
+			continue
+		}
+		t.insertRune(r)
+	}
 	return true
 }
 

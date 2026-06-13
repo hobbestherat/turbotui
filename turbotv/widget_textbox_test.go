@@ -26,3 +26,11 @@ func TestTextBoxEnterBubblesWithoutSubmit(t *testing.T) {
 		t.Fatalf("expected Enter to bubble when OnSubmit is nil")
 	}
 }
+
+func TestTextBoxPasteStripsNewlines(t *testing.T) {
+	box := NewTextBox("", Rect{X: 0, Y: 0, W: 40, H: 1})
+	box.handlePaste(box.Component, "ab\ncd\r\nef")
+	if string(box.Text) != "abcdef" {
+		t.Fatalf("expected newlines stripped, got %q", string(box.Text))
+	}
+}

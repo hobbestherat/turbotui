@@ -93,6 +93,18 @@ For action-style forms, inputs can submit directly:
   - `MultiLineSubmitOnCtrlEnter`: Ctrl+Enter = submit, Enter = newline
 - When `OnSubmit` is not set on `MultiLineInput`, Enter and Shift+Enter both insert new lines.
 
+### Clipboard paste
+
+Bracketed paste (terminal mode `?2004`) is enabled automatically. Pasted text
+arrives as a single literal block, so a multi-line paste is inserted verbatim
+and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
+`MultiLineInput` keeps them. To handle paste in a custom widget, set
+`Component.OnPasteFn` (or call `app.OnPaste(...)` at the engine level).
+
+Copying *out* uses the terminal's own selection: because mouse reporting is on,
+hold **Shift** (most Linux terminals) or **Option** (macOS Terminal / iTerm2)
+while selecting to bypass it and copy normally.
+
 ### Select (drop-down)
 
 ```go

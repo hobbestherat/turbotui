@@ -59,6 +59,7 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 	input.Component.Focusable = true
 	input.Component.DrawFn = input.draw
 	input.Component.OnTypeFn = input.handleType
+	input.Component.OnPasteFn = input.handlePaste
 	input.Component.OnScrollFn = input.handleScroll
 	input.Component.OnClickFn = input.handleClick
 	input.Component.CursorFn = input.cursorPos
@@ -186,6 +187,24 @@ func (m *MultiLineInput) insertRune(value rune) {
 	line[m.CursorX] = value
 	m.Lines[m.CursorY] = string(line)
 	m.CursorX++
+}
+
+// handlePaste inserts pasted text at the cursor, splitting on newlines so a
+// multi-line paste spans multiple lines. CR is dropped so CRLF pastes behave.
+func (m *MultiLineInput) handlePaste(_ *VisualComponent, text string) bool {
+	for _, r := range text {
+		switch {
+		case r == '\r':
+			continue
+		case r == '\n':
+			m.newLine()
+		case r < 0x20:
+			continue
+		default:
+			m.insertRune(r)
+		}
+	}
+	return true
 }
 
 func (m *MultiLineInput) backspace() {

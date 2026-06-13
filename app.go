@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -62,6 +63,13 @@ type ClickEvent struct {
 	Down   bool
 }
 
+// PasteEvent carries a block of text the terminal delivered via bracketed paste
+// (mode ?2004). It is reported as one event so a multi-line paste does not look
+// like a stream of individual keypresses (and cannot trigger Enter submits).
+type PasteEvent struct {
+	Text string
+}
+
 type ScrollEvent struct {
 	X     int
 	Y     int
@@ -88,6 +96,7 @@ type App struct {
 	clickHandlers  []func(ClickEvent)
 	scrollHandlers []func(ScrollEvent)
 	typeHandlers   []func(TypeEvent)
+	pasteHandlers  []func(PasteEvent)
 	resizeHandlers []func(ResizeEvent)
 
 	restoreState *term.State
@@ -179,6 +188,12 @@ func (a *App) OnScroll(handler func(ScrollEvent)) {
 
 func (a *App) OnType(handler func(TypeEvent)) {
 	a.typeHandlers = append(a.typeHandlers, handler)
+}
+
+// OnPaste registers a handler for bracketed-paste blocks. Apps should treat the
+// text as literal input (insert it at the cursor) rather than re-interpreting it.
+func (a *App) OnPaste(handler func(PasteEvent)) {
+	a.pasteHandlers = append(a.pasteHandlers, handler)
 }
 
 // Post schedules fn to run on the event-loop goroutine. It is safe to call from
@@ -415,7 +430,7 @@ func (a *App) Run(ctx context.Context) error {
 
 func (a *App) Close() {
 	if a.restoreState != nil {
-		_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
 	}
@@ -427,7 +442,7 @@ func (a *App) Close() {
 // buffer right after the command that launched the app. The message may span
 // multiple lines and contain ANSI styling (see Styled).
 func (a *App) CloseWithMessage(message string) {
-	_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+	_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 	if a.restoreState != nil {
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
@@ -447,7 +462,7 @@ func (a *App) setupTerminal() error {
 	}
 	a.restoreState = state
 	a.started = true
-	_, err = io.WriteString(a.out, "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h")
+	_, err = io.WriteString(a.out, "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
 	return err
 }
 
@@ -471,6 +486,10 @@ func (a *App) dispatchEvent(event any) {
 	switch e := event.(type) {
 	case TypeEvent:
 		for _, handler := range a.typeHandlers {
+			handler(e)
+		}
+	case PasteEvent:
+		for _, handler := range a.pasteHandlers {
 			handler(e)
 		}
 	case ClickEvent:
@@ -562,8 +581,12 @@ func (p *inputParser) Feed(chunk []byte) []any {
 			events = append(events, event)
 		}
 	}
-	if len(p.pending) > 4096 {
-		p.pending = p.pending[:0]
+	if len(p.pending) > maxPendingBytes {
+		// Keep buffering an in-progress paste until its terminator arrives, but
+		// give up on a runaway (malformed) paste so memory stays bounded.
+		if !bytes.HasPrefix(p.pending, pasteStartSeq) || len(p.pending) > maxPasteBytes {
+			p.pending = p.pending[:0]
+		}
 	}
 	return events
 }
@@ -656,8 +679,35 @@ func parseEscape(data []byte) (any, int, bool) {
 	}
 	params := string(data[2:finalIndex])
 	final := data[finalIndex]
+	// Bracketed paste: ESC[200~ <text> ESC[201~ is delivered as one literal block.
+	if final == '~' && params == "200" {
+		return parseBracketedPaste(data, finalIndex+1)
+	}
 	event := parseCSI(params, final)
 	return event, finalIndex + 1, true
+}
+
+const (
+	maxPendingBytes = 4096
+	maxPasteBytes   = 1 << 20
+)
+
+var (
+	pasteStartSeq = []byte("\x1b[200~")
+	pasteEndSeq   = []byte("\x1b[201~")
+)
+
+// parseBracketedPaste captures everything between the paste-start sequence and
+// the next ESC[201~ terminator. It reports need-more-bytes until the terminator
+// has been buffered so a paste split across reads is reassembled intact.
+func parseBracketedPaste(data []byte, contentStart int) (any, int, bool) {
+	index := bytes.Index(data[contentStart:], pasteEndSeq)
+	if index < 0 {
+		return nil, 0, false
+	}
+	text := string(data[contentStart : contentStart+index])
+	consumed := contentStart + index + len(pasteEndSeq)
+	return PasteEvent{Text: text}, consumed, true
 }
 
 func parseCSI(params string, final byte) any {

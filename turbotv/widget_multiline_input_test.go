@@ -73,3 +73,14 @@ func TestMultiLineInputSubmitModeShiftEnter(t *testing.T) {
 		t.Fatalf("expected Shift+Enter to submit in ShiftEnter mode, got submits=%d", submits)
 	}
 }
+
+func TestMultiLineInputPasteSplitsLines(t *testing.T) {
+	input := NewMultiLineInput("", Rect{X: 0, Y: 0, W: 40, H: 5})
+	input.handlePaste(input.Component, "one\r\ntwo\nthree")
+	if len(input.Lines) != 3 {
+		t.Fatalf("expected 3 lines after paste, got %d: %#v", len(input.Lines), input.Lines)
+	}
+	if input.Lines[0] != "one" || input.Lines[1] != "two" || input.Lines[2] != "three" {
+		t.Fatalf("unexpected pasted lines: %#v", input.Lines)
+	}
+}
