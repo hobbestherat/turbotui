@@ -44,8 +44,6 @@ const (
 	MouseLeft MouseButton = iota
 	MouseMiddle
 	MouseRight
-	MouseWheelUp
-	MouseWheelDown
 )
 
 type TypeEvent struct {
@@ -406,8 +404,8 @@ func (a *App) Run(ctx context.Context) error {
 				return nil
 			}
 			return err
-		case bytes := <-readChannel:
-			for _, event := range a.parser.Feed(bytes) {
+		case data := <-readChannel:
+			for _, event := range a.parser.Feed(data) {
 				a.dispatchEvent(event)
 			}
 			if a.parser.pendingLoneEscape() {
