@@ -55,10 +55,12 @@ func main() {
 	desktop.AddLayer(tv.NewFullscreenLayer("base", root))
 
 	window := tv.NewWindow("Main Window", tv.Rect{X: 6, Y: 3, W: 80, H: 22}, tui.LineDouble)
+	window.Resizable = true
+	window.Minimizable = true
 	window.OnClose = func(_ *tv.Window) {
 		desktop.RemoveTopLayer()
 	}
-	helpLabel := tv.NewLabel("Type in the fields, or press Alt+<highlighted letter>. Scroll the notes with the wheel.", tv.Rect{X: 1, Y: 0, W: 74, H: 1})
+	helpLabel := tv.NewLabel("Type in the fields, or Alt+<letter>. Drag the ◢ corner to resize, [▾] to minimize.", tv.Rect{X: 1, Y: 0, W: 74, H: 1})
 	window.AddContent(helpLabel)
 
 	nameLabel := tv.NewLabel("&Name", tv.Rect{X: 2, Y: 2, W: 12, H: 1})
@@ -98,6 +100,16 @@ func main() {
 	regionLabel.SetTarget(region)
 	window.AddContent(regionLabel)
 	window.AddContent(region)
+
+	// Checkbox: toggles the window drop shadow live.
+	shadows := tv.NewCheckbox("Window &shadow", tv.Rect{X: 2, Y: 14, W: 24, H: 1}, func(on bool) {
+		window.Shadow = on
+	})
+	shadows.SetChecked(window.Shadow)
+	window.AddContent(shadows)
+
+	// Second window showcasing the Tree widget (also resizable + minimizable).
+	buildTreeWindow(desktop)
 
 	status := tv.NewComponent(tv.Rect{X: 1, Y: 0, W: 74, H: 1})
 	status.DrawFn = func(component *tv.VisualComponent, surface tv.Surface) {
@@ -140,6 +152,43 @@ func main() {
 		tui.Styled("  Thanks for trying the toolkit!", tui.ANSIColor(11), tui.DefaultColor(), false),
 	}, "\n")
 	app.CloseWithMessage(summary)
+}
+
+// buildTreeWindow adds a resizable, minimizable window containing a Tree widget
+// so the demo exercises the tree, the resize grip and the minimize button.
+func buildTreeWindow(desktop *tv.Desktop) {
+	win := tv.NewWindow("Explorer (Tree)", tv.Rect{X: 30, Y: 8, W: 40, H: 14}, tui.LineSingle)
+	win.Resizable = true
+	win.Minimizable = true
+
+	tree := tv.NewTree(tv.Rect{X: 1, Y: 1, W: 36, H: 9})
+	src := tree.AddRoot(tv.NewTreeNode("src/"))
+	src.Expanded = true
+	src.AddLeaf("main.go")
+	widgets := src.Add(tv.NewTreeNode("widgets/"))
+	widgets.AddLeaf("button.go")
+	widgets.AddLeaf("checkbox.go")
+	widgets.AddLeaf("tree.go")
+	docs := tree.AddRoot(tv.NewTreeNode("docs/"))
+	docs.AddLeaf("README.md")
+	docs.AddLeaf("DESIGN.md")
+	tree.AddRoot(tv.NewTreeNode("go.mod"))
+
+	status := tv.NewLabel("Select a node…", tv.Rect{X: 1, Y: 11, W: 36, H: 1})
+	tree.OnSelect = func(node *tv.TreeNode) {
+		status.SetText("Selected: " + node.Label)
+	}
+	tree.OnActivate = func(node *tv.TreeNode) {
+		status.SetText("Activated: " + node.Label)
+	}
+	win.AddContent(tree)
+	win.AddContent(status)
+
+	layer := tv.NewWindowLayer("tree", win)
+	win.OnClose = func(_ *tv.Window) {
+		desktop.RemoveLayer(layer)
+	}
+	desktop.AddLayer(layer)
 }
 
 func focusName(a *tv.TextBox, b *tv.TextBox, m *tv.MultiLineInput, v *tv.TextView, button *tv.Button, region *tv.Select) string {

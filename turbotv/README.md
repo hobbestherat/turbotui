@@ -77,12 +77,15 @@ func main() {
 | `MultiLineInput`     | `NewMultiLineInput(text, bounds)`                      | Multi-line editor; `GetText`; optional `OnSubmit` + `SubmitMode` |
 | `TextView`           | `NewTextView(text, bounds)`                            | Read-only, mouse-wheel scrollable; `SetText` |
 | `Select`             | `NewSelect(desktop, options, bounds)`                  | Drop-down combo; `Value`, `GetSelected`, `SetSelected`, `OnChange` |
+| `Checkbox`           | `NewCheckbox(label, bounds, onToggle)`                 | On/off toggle; `IsChecked`/`SetChecked`; Space/Enter/click |
+| `Tree`               | `NewTree(bounds)`                                      | Collapsible, scrollable tree; `AddRoot`, `Selected`, `OnSelect`/`OnActivate` |
 | `MenuBar`            | `NewMenuBar(bounds, menus...)`                         | See below |
 | `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers |
 
 All input widgets are focusable; `Tab`/`Shift+Tab` and arrow keys move focus
-within the top layer. State is read/written with explicit methods
-(`GetText()/SetText()`, `Value()/SetSelected()`) — there are no getters/setters.
+within the top layer. State is read and written with explicit methods
+(`GetText()`/`SetText()`, `Value()`/`SetSelected()`) rather than reflection or
+data binding.
 
 For action-style forms, inputs can submit directly:
 

@@ -36,6 +36,12 @@ type MultiLineInput struct {
 	selAnchorX int
 	selAnchorY int // -1 when there is no selection
 	selecting  bool
+	// pressLine/pressCursor remember where the mouse went down so a selection is
+	// only anchored once the pointer actually drags away from that point. A plain
+	// click therefore leaves no selection (which previously caused the first
+	// typed character to be treated as selected and overwritten).
+	pressLine   int
+	pressCursor int
 }
 
 type wrappedLineRow struct {
@@ -248,10 +254,12 @@ func (m *MultiLineInput) selectionText() string {
 	y0, x0, y1, x1 := m.selectionOrdered()
 	if y0 == y1 {
 		runes := []rune(m.Lines[y0])
+		x0, x1 = clampRange(len(runes), x0, x1)
 		return string(runes[x0:x1])
 	}
 	var builder strings.Builder
 	first := []rune(m.Lines[y0])
+	x0 = clampCol(len(first), x0)
 	builder.WriteString(string(first[x0:]))
 	builder.WriteByte('\n')
 	for line := y0 + 1; line < y1; line++ {
@@ -259,6 +267,7 @@ func (m *MultiLineInput) selectionText() string {
 		builder.WriteByte('\n')
 	}
 	last := []rune(m.Lines[y1])
+	x1 = clampCol(len(last), x1)
 	builder.WriteString(string(last[:x1]))
 	return builder.String()
 }
@@ -270,6 +279,10 @@ func (m *MultiLineInput) deleteSelection() bool {
 	y0, x0, y1, x1 := m.selectionOrdered()
 	first := []rune(m.Lines[y0])
 	last := []rune(m.Lines[y1])
+	// Selection columns can outlive the text they referenced (e.g. after the
+	// cursor moves to a shorter line), so clamp before slicing to avoid panics.
+	x0 = clampCol(len(first), x0)
+	x1 = clampCol(len(last), x1)
 	merged := string(first[:x0]) + string(last[x1:])
 	newLines := append([]string{}, m.Lines[:y0]...)
 	newLines = append(newLines, merged)
@@ -279,6 +292,28 @@ func (m *MultiLineInput) deleteSelection() bool {
 	m.CursorX = x0
 	m.selAnchorY = -1
 	return true
+}
+
+// clampCol bounds a column index to [0, length].
+func clampCol(length, col int) int {
+	if col < 0 {
+		return 0
+	}
+	if col > length {
+		return length
+	}
+	return col
+}
+
+// clampRange bounds a same-line [x0, x1) selection to [0, length] and ensures
+// x0 <= x1.
+func clampRange(length, x0, x1 int) (int, int) {
+	x0 = clampCol(length, x0)
+	x1 = clampCol(length, x1)
+	if x0 > x1 {
+		x0, x1 = x1, x0
+	}
+	return x0, x1
 }
 
 func (m *MultiLineInput) forwardDelete() {
@@ -594,15 +629,25 @@ func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.Click
 		if !abs.Contains(event.X, event.Y) {
 			return false
 		}
+		// Place the caret and clear any existing selection. Do NOT anchor a
+		// selection yet: a selection is only started if the pointer drags.
 		m.CursorY = line
 		m.CursorX = cursor
-		m.selAnchorX = cursor
-		m.selAnchorY = line
+		m.pressLine = line
+		m.pressCursor = cursor
+		m.selAnchorY = -1
 		m.selecting = true
 		return true
 	}
-	// Drag motion: extend the selection to the pointer.
-	m.CursorY = line
-	m.CursorX = cursor
+	// Drag motion: the first time the pointer leaves the press point, anchor the
+	// selection there; then extend it to the current pointer position.
+	if line != m.pressLine || cursor != m.pressCursor {
+		if m.selAnchorY < 0 {
+			m.selAnchorX = m.pressCursor
+			m.selAnchorY = m.pressLine
+		}
+		m.CursorY = line
+		m.CursorX = cursor
+	}
 	return true
 }

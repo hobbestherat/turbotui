@@ -265,27 +265,15 @@ func (t *TextView) clampScroll(total int, height int) {
 }
 
 // drawScrollbar paints the right-hand track with up/down arrows and a thumb whose
-// position reflects scrollY. Focused views use FocusFG; unfocused ones are dimmed.
+// position reflects scrollY, delegating to the shared scrollbar so all widgets
+// look and behave the same. Focused views use FocusFG; unfocused ones are dimmed.
 func (t *TextView) drawScrollbar(surface Surface, abs Rect, focused bool, total int) {
 	color := tui.ANSIColor(8)
 	if focused {
 		color = t.FocusFG
 	}
-	x := abs.Right()
-	for row := 0; row < abs.H; row++ {
-		surface.SetCell(x, abs.Y+row, tui.Cell{Ch: '│', FG: color, BG: t.BG})
-	}
-	surface.SetCell(x, abs.Y, tui.Cell{Ch: '▲', FG: color, BG: t.BG, Bold: focused})
-	surface.SetCell(x, abs.Bottom(), tui.Cell{Ch: '▼', FG: color, BG: t.BG, Bold: focused})
-	span := total - abs.H
-	track := abs.H - 2
-	if span > 0 && track > 0 {
-		thumb := t.scrollY * (track - 1) / span
-		if thumb > track-1 {
-			thumb = track - 1
-		}
-		surface.SetCell(x, abs.Y+1+thumb, tui.Cell{Ch: '█', FG: color, BG: t.BG, Bold: focused})
-	}
+	track := Rect{X: abs.Right(), Y: abs.Y, W: 1, H: abs.H}
+	drawVScrollbar(surface, track, total, abs.H, t.scrollY, color, t.BG, focused)
 }
 
 func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent) bool {

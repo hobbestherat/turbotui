@@ -8,10 +8,7 @@ type Rect struct {
 }
 
 func (r Rect) Empty() bool {
-	if r.W <= 0 || r.H <= 0 {
-		return true
-	}
-	return false
+	return r.W <= 0 || r.H <= 0
 }
 
 func (r Rect) Contains(x int, y int) bool {

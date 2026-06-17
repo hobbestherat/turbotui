@@ -185,6 +185,13 @@ func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 	surface.DrawBox(rect, tui.LineSingle, DefaultTheme.DialogBorderFG, DefaultTheme.DialogBG)
 	inner := Rect{X: rect.X + 1, Y: rect.Y + 1, W: rect.W - 2, H: rect.H - 2}
 	offset := s.viewOffset()
+	// When the list is taller than the visible area, reserve the last column for
+	// a scrollbar so the user can see there is more to scroll to.
+	scrollbar := len(s.Options) > inner.H && inner.W > 1
+	textW := inner.W
+	if scrollbar {
+		textW = inner.W - 1
+	}
 	for row := 0; row < inner.H; row++ {
 		index := offset + row
 		if index >= len(s.Options) {
@@ -195,12 +202,17 @@ func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 			fg, bg = tui.ANSIColor(15), tui.ANSIColor(4)
 		}
 		style := tui.Cell{FG: fg, BG: bg}
-		surface.Fill(Rect{X: inner.X, Y: inner.Y + row, W: inner.W, H: 1}, style)
+		surface.Fill(Rect{X: inner.X, Y: inner.Y + row, W: textW, H: 1}, style)
 		runes := []rune(s.Options[index])
-		if len(runes) > inner.W {
-			runes = runes[:inner.W]
+		if len(runes) > textW {
+			runes = runes[:textW]
 		}
 		surface.WriteString(inner.X, inner.Y+row, string(runes), style)
+	}
+	if scrollbar {
+		track := Rect{X: inner.X + inner.W - 1, Y: inner.Y, W: 1, H: inner.H}
+		drawVScrollbar(surface, track, len(s.Options), inner.H, offset,
+			DefaultTheme.DialogBorderFG, DefaultTheme.DialogBG, true)
 	}
 }
 

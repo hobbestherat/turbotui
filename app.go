@@ -724,7 +724,7 @@ func parseCSI(params string, final byte) any {
 	case 'Z':
 		return TypeEvent{Key: KeyBackTab}
 	case 'u':
-		keyCode, mod := parseCSIU(params)
+		keyCode, mod := parseCSIParams(params)
 		shift, alt, ctrl := decodeCSIModifier(mod)
 		if keyCode == 13 {
 			return TypeEvent{Key: KeyEnter, Shift: shift, Alt: alt, Ctrl: ctrl}
@@ -735,7 +735,7 @@ func parseCSI(params string, final byte) any {
 			return TypeEvent{Key: KeyRune, Rune: rune(keyCode), Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
 	case '~':
-		value, mod := parseCSITilde(params)
+		value, mod := parseCSIParams(params)
 		shift, alt, ctrl := decodeCSIModifier(mod)
 		switch value {
 		case 1, 7:
@@ -793,26 +793,11 @@ func parseCSIModifiers(params string) (bool, bool, bool) {
 	return decodeCSIModifier(mod)
 }
 
-func parseCSIU(params string) (int, int) {
-	parts := strings.Split(params, ";")
-	if len(parts) == 0 {
-		return 0, 1
-	}
-	keyCode, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 1
-	}
-	mod := 1
-	if len(parts) > 1 {
-		value, err := strconv.Atoi(parts[1])
-		if err == nil {
-			mod = value
-		}
-	}
-	return keyCode, mod
-}
-
-func parseCSITilde(params string) (int, int) {
+// parseCSIParams splits a CSI parameter string into its leading numeric code and
+// modifier value (e.g. "3;5" -> 3, 5). Missing or malformed fields default to a
+// code of 0 and an unmodified value of 1. It serves both the CSU-u ('u') and
+// CSI-tilde ('~') key encodings, which share this layout.
+func parseCSIParams(params string) (int, int) {
 	parts := strings.Split(params, ";")
 	if len(parts) == 0 {
 		return 0, 1

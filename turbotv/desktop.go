@@ -121,6 +121,101 @@ func (d *Desktop) TopLayer() *Layer {
 	return d.layers[len(d.layers)-1]
 }
 
+// RaiseLayer moves layer to the front of the z-stack, keeping it below any modal
+// layers that are currently on top. Fullscreen (background) layers are never
+// raised so they stay behind real windows. It is a no-op when the layer is
+// already as high as it is allowed to go.
+func (d *Desktop) RaiseLayer(layer *Layer) {
+	if d.raiseLayer(layer) {
+		d.ensureFocusInTopLayer()
+		d.Redraw()
+	}
+}
+
+// raiseLayer performs the reordering without redrawing, returning true when the
+// stack changed. Callers that already redraw (e.g. handleClick) use this form.
+func (d *Desktop) raiseLayer(layer *Layer) bool {
+	if layer == nil || layer.FullScreen {
+		return false
+	}
+	index := -1
+	for i, existing := range d.layers {
+		if existing == layer {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return false
+	}
+	// Target position: above every other layer, but below any modal layers that
+	// currently sit at the very top of the stack.
+	insert := len(d.layers) - 1
+	for insert > 0 && d.layers[insert].Modal && d.layers[insert] != layer {
+		insert--
+	}
+	if index == insert {
+		return false
+	}
+	d.layers = append(d.layers[:index], d.layers[index+1:]...)
+	if insert > len(d.layers) {
+		insert = len(d.layers)
+	}
+	d.layers = append(d.layers, nil)
+	copy(d.layers[insert+1:], d.layers[insert:])
+	d.layers[insert] = layer
+	return true
+}
+
+// layerForComponent returns the layer whose root is an ancestor of c, or nil.
+func (d *Desktop) layerForComponent(c *VisualComponent) *Layer {
+	root := c
+	for root.Parent != nil {
+		root = root.Parent
+	}
+	for _, layer := range d.layers {
+		if layer != nil && layer.Root == root {
+			return layer
+		}
+	}
+	return nil
+}
+
+// focusIntoLayer ensures the keyboard goes to the just-clicked layer. If the
+// clicked target is itself focusable it gets focus; otherwise, when focus is not
+// already inside this layer, the layer's first focusable widget is focused (so a
+// click on a window's title bar or empty area still makes it typeable).
+func (d *Desktop) focusIntoLayer(layer *Layer, target *VisualComponent) {
+	if target != nil && target.Focusable {
+		d.setFocus(target)
+		return
+	}
+	if layer == nil {
+		return
+	}
+	if d.focused != nil && componentInLayer(d.focused, layer) {
+		return
+	}
+	var items []*VisualComponent
+	collectFocusable(layer.Root, &items)
+	if len(items) > 0 {
+		d.setFocus(items[0])
+	}
+}
+
+// componentInLayer reports whether c is the layer root or a descendant of it.
+func componentInLayer(c *VisualComponent, layer *Layer) bool {
+	if layer == nil {
+		return false
+	}
+	for current := c; current != nil; current = current.Parent {
+		if current == layer.Root {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Desktop) Redraw() {
 	d.compose()
 	d.updateCursor()
@@ -188,10 +283,19 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 			target = d.hitTestTopLayer(event.X, event.Y)
 		}
 		if target != nil {
-			if d.mouseCapture == nil {
+			newPress := d.mouseCapture == nil
+			if newPress {
 				d.mouseCapture = target
-			}
-			if target.Focusable {
+				// A fresh press on a window raises it to the front and routes the
+				// keyboard into it, so clicking anywhere on a background window
+				// both surfaces it and makes it typeable.
+				if layer := d.layerForComponent(target); layer != nil {
+					d.raiseLayer(layer)
+					d.focusIntoLayer(layer, target)
+				} else if target.Focusable {
+					d.setFocus(target)
+				}
+			} else if target.Focusable {
 				d.setFocus(target)
 			}
 			_ = target.BubbleClick(event)

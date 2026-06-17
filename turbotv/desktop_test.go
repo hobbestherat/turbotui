@@ -128,6 +128,66 @@ func TestFocusedTextBoxConsumesArrowKeys(t *testing.T) {
 	}
 }
 
+func TestClickRaisesLowerWindowAndFocusesIt(t *testing.T) {
+	var output bytes.Buffer
+	app := tui.NewWithSize(80, 25, &output)
+	desktop := NewDesktop(app)
+
+	// Window A on the left, window B on the right; B is added last so it starts
+	// on top with the keyboard focus.
+	windowA := NewWindow("A", Rect{X: 0, Y: 0, W: 20, H: 8}, tui.LineSingle)
+	inputA := NewComponent(Rect{X: 0, Y: 0, W: 5, H: 1})
+	inputA.Focusable = true
+	windowA.Content.AddChild(inputA)
+	layerA := NewWindowLayer("A", windowA)
+	desktop.AddLayer(layerA)
+
+	windowB := NewWindow("B", Rect{X: 40, Y: 0, W: 20, H: 8}, tui.LineSingle)
+	inputB := NewComponent(Rect{X: 0, Y: 0, W: 5, H: 1})
+	inputB.Focusable = true
+	windowB.Content.AddChild(inputB)
+	layerB := NewWindowLayer("B", windowB)
+	desktop.AddLayer(layerB)
+	desktop.SetFocus(inputB)
+
+	// Click window A's title bar (a non-focusable region).
+	desktop.handleClick(tui.ClickEvent{X: 2, Y: 0, Button: tui.MouseLeft, Down: true})
+	desktop.handleClick(tui.ClickEvent{X: 2, Y: 0, Button: tui.MouseLeft, Down: false})
+
+	if desktop.TopLayer() != layerA {
+		t.Fatalf("expected clicked window A to be raised to the top of the stack")
+	}
+	if !inputA.HasFocus {
+		t.Fatalf("expected clicking window A to move keyboard focus into it")
+	}
+	if inputB.HasFocus {
+		t.Fatalf("expected window B to lose focus when A is clicked")
+	}
+}
+
+func TestRaiseLayerKeepsModalOnTop(t *testing.T) {
+	var output bytes.Buffer
+	app := tui.NewWithSize(80, 25, &output)
+	desktop := NewDesktop(app)
+
+	winRoot := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 4})
+	layer := NewWindowLayer("win", winRoot)
+	other := NewComponent(Rect{X: 20, Y: 0, W: 10, H: 4})
+	otherLayer := NewWindowLayer("other", other)
+	modalRoot := NewComponent(Rect{X: 5, Y: 5, W: 10, H: 4})
+	modalLayer := NewModalLayer("modal", modalRoot)
+
+	desktop.AddLayer(layer)
+	desktop.AddLayer(otherLayer)
+	desktop.AddLayer(modalLayer)
+
+	desktop.RaiseLayer(layer)
+
+	if desktop.TopLayer() != modalLayer {
+		t.Fatalf("expected modal layer to stay on top after raising a window")
+	}
+}
+
 func TestHitTestFallsThroughLowerLayer(t *testing.T) {
 	var output bytes.Buffer
 	app := tui.NewWithSize(30, 8, &output)
