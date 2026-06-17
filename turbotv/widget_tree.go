@@ -175,7 +175,7 @@ func (t *Tree) fireSelect(rows []treeRow) {
 		t.OnSelect(rows[t.selected].node)
 	}
 }
-func (t *Tree) handleType(component *VisualComponent, event tui.TypeEvent) bool {
+func (t *Tree) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	rows := t.flatten()
 	if len(rows) == 0 {
 		return false
