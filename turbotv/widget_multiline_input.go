@@ -106,8 +106,12 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 	fg, bg := inputColors(component.HasFocus, m.FG, m.BG, m.FocusFG, m.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
+	// Wrap once and derive the caret row from the same layout, so the whole draw
+	// is a single O(rows) pass. Previously this re-derived the layout up to four
+	// times (twice through a redundant focused-only ensureScroll).
 	rows := m.wrappedRows(abs.W)
-	m.ensureScroll(abs.H, abs.W)
+	cursorRow, _ := m.cursorRowCol(rows, abs.W)
+	m.ensureScrolledTo(abs.H, cursorRow, len(rows))
 	for row := 0; row < abs.H; row++ {
 		rowIndex := m.ScrollY + row
 		if rowIndex < 0 || rowIndex >= len(rows) {
@@ -124,16 +128,16 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 			surface.SetCell(abs.X+col, abs.Y+row, cell)
 		}
 	}
-	if component.HasFocus {
-		m.ensureScroll(abs.H, abs.W)
-	}
 }
 
 // cursorPos reports the absolute caret position for the hardware cursor.
 func (m *MultiLineInput) cursorPos(component *VisualComponent) (int, int, bool) {
 	abs := component.AbsoluteBounds()
-	m.ensureScroll(abs.H, abs.W)
+	// Compute the caret row once and feed it (plus the total) into the scroll
+	// clamp, instead of ensureScroll re-deriving cursorVisualPos and then this
+	// method calling it a second time.
 	cursorVisualY, cursorVisualX := m.cursorVisualPos(abs.W)
+	m.ensureScrolledTo(abs.H, cursorVisualY, m.totalVisualRows(abs.W))
 	cursorY := cursorVisualY - m.ScrollY
 	if cursorY < 0 || cursorY >= abs.H {
 		return 0, 0, false
@@ -437,30 +441,35 @@ func (m *MultiLineInput) moveRight() {
 }
 
 func (m *MultiLineInput) moveUp(width int) {
-	cursorRow, cursorCol := m.cursorVisualPos(width)
+	rows := m.wrappedRows(width)
+	cursorRow, cursorCol := m.cursorRowCol(rows, width)
 	if cursorRow <= 0 {
 		return
 	}
-	line, column := m.visualPosToCursor(width, cursorRow-1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow-1, cursorCol)
 	m.CursorY = line
 	m.CursorX = column
 }
 
 func (m *MultiLineInput) moveDown(width int) {
-	cursorRow, cursorCol := m.cursorVisualPos(width)
-	if cursorRow >= m.totalVisualRows(width)-1 {
+	rows := m.wrappedRows(width)
+	cursorRow, cursorCol := m.cursorRowCol(rows, width)
+	if cursorRow >= len(rows)-1 {
 		return
 	}
-	line, column := m.visualPosToCursor(width, cursorRow+1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow+1, cursorCol)
 	m.CursorY = line
 	m.CursorX = column
 }
 
-func (m *MultiLineInput) ensureScroll(height int, width int) {
+// ensureScrolledTo clamps ScrollY so the caret (at cursorRow of total visual
+// rows) stays inside the viewport. It is the allocation-free core of the old
+// ensureScroll: callers pass the already-computed caret row and row count so the
+// layout is not re-derived inside.
+func (m *MultiLineInput) ensureScrolledTo(height int, cursorRow int, total int) {
 	if height < 1 {
 		height = 1
 	}
-	cursorRow, _ := m.cursorVisualPos(width)
 	if cursorRow < m.ScrollY {
 		m.ScrollY = cursorRow
 	}
@@ -470,7 +479,7 @@ func (m *MultiLineInput) ensureScroll(height int, width int) {
 	if m.ScrollY < 0 {
 		m.ScrollY = 0
 	}
-	max := m.totalVisualRows(width) - height
+	max := total - height
 	if max < 0 {
 		max = 0
 	}
@@ -586,8 +595,54 @@ func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
 	return row, col
 }
 
-func (m *MultiLineInput) visualPosToCursor(width int, row int, col int) (int, int) {
-	rows := m.wrappedRows(width)
+// cursorRowCol derives the (visual row, column) of the caret from an already
+// wrapped layout, clamping CursorY/CursorX into bounds as a side effect (the
+// same clamping cursorVisualPos performs). Use it on paths that have already
+// called wrappedRows, to avoid re-deriving the layout.
+func (m *MultiLineInput) cursorRowCol(rows []wrappedLineRow, width int) (int, int) {
+	if width < 1 {
+		width = 1
+	}
+	if len(m.Lines) == 0 {
+		return 0, 0
+	}
+	if m.CursorY < 0 {
+		m.CursorY = 0
+	}
+	if m.CursorY >= len(m.Lines) {
+		m.CursorY = len(m.Lines) - 1
+	}
+	lineRunes := []rune(m.Lines[m.CursorY])
+	if m.CursorX < 0 {
+		m.CursorX = 0
+	}
+	if m.CursorX > len(lineRunes) {
+		m.CursorX = len(lineRunes)
+	}
+	// Count wrapped rows belonging to lines strictly above the cursor line.
+	row := 0
+	for _, w := range rows {
+		if w.line < m.CursorY {
+			row++
+		}
+	}
+	offset := m.CursorX / width
+	col := m.CursorX % width
+	lineRows := m.rowsForLine(m.Lines[m.CursorY], width)
+	if offset >= lineRows {
+		offset = lineRows - 1
+		if col >= width {
+			col = width - 1
+		}
+	}
+	row += offset
+	return row, col
+}
+
+// visualPosToCursorFromRows maps a (visual row, column) back to a (line, cursor)
+// using an already-wrapped layout. It is the allocation-free form of the old
+// visualPosToCursor, which re-wrapped the whole buffer on every call.
+func (m *MultiLineInput) visualPosToCursorFromRows(rows []wrappedLineRow, row int, col int) (int, int) {
 	if len(rows) == 0 {
 		return 0, 0
 	}
@@ -616,6 +671,9 @@ func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.Click
 		m.selecting = false
 		return true
 	}
+	// Wrap once and reuse it for the hit mapping (a drag fires many motion
+	// events; this avoids re-wrapping the whole buffer on each one).
+	rows := m.wrappedRows(component.Bounds.W)
 	row := m.ScrollY + (event.Y - abs.Y)
 	col := event.X - abs.X
 	if col < 0 {
@@ -624,7 +682,7 @@ func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.Click
 	if row < 0 {
 		row = 0
 	}
-	line, cursor := m.visualPosToCursor(component.Bounds.W, row, col)
+	line, cursor := m.visualPosToCursorFromRows(rows, row, col)
 	if !m.selecting {
 		if !abs.Contains(event.X, event.Y) {
 			return false

@@ -72,6 +72,17 @@ type TextView struct {
 	scrollY       int
 	follow        bool
 	draggingThumb bool
+
+	// layoutRows is memoised by (layoutVersion, cachedWidth, Wrap). layoutVersion
+	// is bumped by every content change (via touch), so an unchanged view drawn
+	// frame after frame — or queried several times during one event (draw, click,
+	// scroll, thumb-drag) — wraps its text once instead of on every call.
+	layoutVersion uint64
+	cachedRows    []renderRow
+	cachedWidth   int
+	cachedWrap    bool
+	cachedVersion uint64
+	layoutCached  bool
 }
 
 func NewTextView(text string, bounds Rect) *TextView {
@@ -134,6 +145,7 @@ func (t *TextView) Clear() {
 	t.entries = nil
 	t.scrollY = 0
 	t.follow = true
+	t.layoutVersion++
 }
 
 func (t *TextView) AddLine(text string) *TextEntry {
@@ -157,8 +169,10 @@ func (t *TextView) ScrollToBottom() {
 
 // touch is called whenever content changes; while following, the view stays
 // pinned to the bottom so streamed text remains visible. The huge sentinel is
-// clamped to the real maximum during draw.
+// clamped to the real maximum during draw. It also bumps layoutVersion so the
+// next layoutRows re-wraps the (now changed) content.
 func (t *TextView) touch() {
+	t.layoutVersion++
 	if t.follow {
 		t.scrollY = 1 << 30
 	}
@@ -172,7 +186,26 @@ type renderRow struct {
 	marker rune // ▸/▾ on the first row of a foldable entry, else 0
 }
 
+// layoutRows returns the wrapped display rows for the current content at the
+// given width. The result is memoised by (content version, width, Wrap), so the
+// expensive per-entry wrapText pass runs at most once per change: repeated calls
+// during a single frame (draw plus scroll/click/thumb-drag helpers) and across
+// idle redraws return the cached slice without re-allocating.
 func (t *TextView) layoutRows(width int) []renderRow {
+	if t.layoutCached && t.cachedVersion == t.layoutVersion &&
+		t.cachedWidth == width && t.cachedWrap == t.Wrap {
+		return t.cachedRows
+	}
+	rows := t.computeRows(width)
+	t.cachedRows = rows
+	t.cachedWidth = width
+	t.cachedWrap = t.Wrap
+	t.cachedVersion = t.layoutVersion
+	t.layoutCached = true
+	return rows
+}
+
+func (t *TextView) computeRows(width int) []renderRow {
 	rows := make([]renderRow, 0, len(t.entries))
 	var walk func(entries []*TextEntry, depth int)
 	walk = func(entries []*TextEntry, depth int) {

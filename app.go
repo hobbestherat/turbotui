@@ -79,6 +79,10 @@ type ResizeEvent struct {
 	Height int
 }
 
+// App is the terminal application engine: a double-buffered cell grid plus an
+// input-driven event loop. Its zero value is NOT usable (it has no output writer
+// and an unbuffered/nil post queue) — construct one with New, NewWithIO or
+// NewWithSize.
 type App struct {
 	in      *os.File
 	out     io.Writer
@@ -102,6 +106,13 @@ type App struct {
 	started      bool
 
 	postChannel chan func()
+
+	// applyErr holds the terminal write error (if any) recorded by the most
+	// recent Apply. onApplyError, when set, is invoked with that error. Run
+	// treats a non-nil applyErr as fatal so the app exits cleanly instead of
+	// continuing to render against a dead output (e.g. a closed pipe).
+	applyErr     error
+	onApplyError func(error)
 
 	// Hardware cursor state. cursorVisible/X/Y is the desired state; the front*
 	// fields track what was last emitted so Apply only writes cursor escapes on
@@ -128,13 +139,36 @@ func (a *App) HideCursor() {
 	a.cursorVisible = false
 }
 
-func New() (*App, error) {
+// New creates an App sized to the current terminal. A failure to read the
+// terminal size (e.g. when stdout is not a tty) is not an error: it falls back
+// to an 80×25 size, mirroring NewWithSize. The failure that actually matters —
+// stdin/stdout not being a real terminal — surfaces later from Run. Use
+// Validate to detect that up front.
+func New() *App {
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width < 1 || height < 1 {
 		width = 80
 		height = 25
 	}
-	return NewWithIO(os.Stdin, os.Stdout, width, height), nil
+	return NewWithIO(os.Stdin, os.Stdout, width, height)
+}
+
+// Validate reports whether the App is attached to a real terminal — the check
+// that New (intentionally) does not perform, since size detection has a sane
+// fallback. It returns nil for buffer-backed apps built with NewWithSize (which
+// have no terminal by design). Call it right after New when you want to fail
+// fast with a clear message instead of waiting for Run.
+func (a *App) Validate() error {
+	if a.termOut == nil {
+		return nil
+	}
+	if a.in == nil || !term.IsTerminal(int(a.in.Fd())) {
+		return errors.New("turbotui: stdin is not a terminal")
+	}
+	if !term.IsTerminal(int(a.termOut.Fd())) {
+		return errors.New("turbotui: stdout is not a terminal")
+	}
+	return nil
 }
 
 func NewWithIO(in *os.File, out *os.File, width int, height int) *App {
@@ -197,11 +231,47 @@ func (a *App) OnPaste(handler func(PasteEvent)) {
 // Post schedules fn to run on the event-loop goroutine. It is safe to call from
 // any goroutine, which makes it the way to mutate UI state from a background
 // task (timers, network calls, …) and then trigger a redraw.
+//
+// Post BLOCKS once the 64-deep queue is full: a background producer that outruns
+// a slow event loop will stall until the loop drains. That is the safe default
+// (it never drops an update), but if a producer cannot afford to block, use
+// TryPost instead.
 func (a *App) Post(fn func()) {
 	if fn == nil {
 		return
 	}
 	a.postChannel <- fn
+}
+
+// TryPost is the non-blocking analogue of Post: it enqueues fn and returns true
+// when there was room, and returns false (leaving fn unscheduled) when the queue
+// is full. Use it from background producers that must not stall against a slow
+// event loop; prefer Post when every update has to run.
+func (a *App) TryPost(fn func()) bool {
+	if fn == nil {
+		return true
+	}
+	select {
+	case a.postChannel <- fn:
+		return true
+	default:
+		return false
+	}
+}
+
+// OnApplyError registers a callback invoked when Apply fails to write to the
+// terminal (e.g. stdout was closed or redirected onto a broken pipe). It fires
+// before Run treats the error as fatal, giving the app a chance to log or
+// customise. Leaving it unset is fine: Run still returns the error and exits.
+func (a *App) OnApplyError(fn func(error)) {
+	a.onApplyError = fn
+}
+
+// LastApplyError returns the terminal write error recorded by the most recent
+// Apply, or nil. Run returns this same error and exits the loop when it is
+// non-nil, so callers can inspect it after Run returns.
+func (a *App) LastApplyError() error {
+	return a.applyErr
 }
 
 func (a *App) OnResize(handler func(ResizeEvent)) {
@@ -468,6 +538,15 @@ func (a *App) Apply() error {
 		return nil
 	}
 	_, err := io.WriteString(a.out, output.String())
+	if err != nil {
+		// The terminal went away (broken pipe, redirected/closed stdout, …).
+		// Record it so Run can exit cleanly and surface it to any callback
+		// rather than silently rendering into a dead output.
+		a.applyErr = err
+		if a.onApplyError != nil {
+			a.onApplyError(err)
+		}
+	}
 	return err
 }
 
@@ -542,6 +621,12 @@ func (a *App) Run(ctx context.Context) error {
 			fn()
 		case <-resizeChannel:
 			a.handleTerminalResize()
+		}
+		// A handler above (e.g. a redraw triggered by an event or Post) may have
+		// failed to flush to the terminal. Treat that as fatal so the app exits
+		// cleanly instead of spinning against a dead output.
+		if a.applyErr != nil {
+			return a.applyErr
 		}
 	}
 }

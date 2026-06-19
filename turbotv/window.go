@@ -64,10 +64,13 @@ func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 	window.Component.DrawFn = window.draw
 	window.Component.LayoutFn = window.layout
 	window.Component.OnClickFn = window.handleClick
-	window.Content = NewComponent(Rect{X: 1, Y: 1, W: bounds.W - 2, H: bounds.H - 2})
+	// Content/BottomBar are children of the window, so their bounds are
+	// window-relative: inset the window's size, not its position.
+	inner := Rect{W: bounds.W, H: bounds.H}.Inset(1)
+	window.Content = NewComponent(inner)
 	window.Content.UseBackground = true
 	window.Content.Background = tui.Cell{Ch: ' ', FG: DefaultTheme.WindowFG, BG: DefaultTheme.WindowBG}
-	window.BottomBar = NewComponent(Rect{X: 1, Y: bounds.H - 2, W: bounds.W - 2, H: 1})
+	window.BottomBar = NewComponent(Rect{X: inner.X, Y: inner.Bottom(), W: inner.W, H: 1})
 	window.BottomBar.Visible = false
 	window.Component.AddChild(window.Content)
 	window.Component.AddChild(window.BottomBar)
@@ -135,12 +138,13 @@ func (w *Window) layout(component *VisualComponent) {
 	if component.Bounds.W < 2 || component.Bounds.H < 2 {
 		return
 	}
-	contentHeight := component.Bounds.H - 2
+	inner := Rect{W: component.Bounds.W, H: component.Bounds.H}.Inset(1)
+	contentHeight := inner.H
 	if w.BottomBar.Visible && contentHeight > 1 {
 		contentHeight--
-		w.BottomBar.SetBounds(Rect{X: 1, Y: component.Bounds.H - 2, W: component.Bounds.W - 2, H: 1})
+		w.BottomBar.SetBounds(Rect{X: inner.X, Y: inner.Bottom(), W: inner.W, H: 1})
 	}
-	w.Content.SetBounds(Rect{X: 1, Y: 1, W: component.Bounds.W - 2, H: contentHeight})
+	w.Content.SetBounds(Rect{X: inner.X, Y: inner.Y, W: inner.W, H: contentHeight})
 }
 func (w *Window) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()

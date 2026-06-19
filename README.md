@@ -45,8 +45,8 @@ import (
 )
 
 func main() {
-    app, err := tui.New()
-    if err != nil {
+    app := tui.New()
+    if err := app.Validate(); err != nil {
         panic(err)
     }
 
@@ -102,7 +102,10 @@ func main() {
 
 ### Construction helpers
 
-- `tui.New()` — auto-sizes to the current terminal (the usual choice).
+- `tui.New()` — auto-sizes to the current terminal (the usual choice). It never
+  returns an error: an unreadable size falls back to 80×25.
+- `app.Validate()` — optional; returns an error if stdin/stdout are not a
+  terminal, so non-tty startup is detectable immediately rather than at `Run`.
 - `tui.NewWithIO(in, out, w, h)` — explicit files/size (e.g. a PTY).
 - `tui.NewWithSize(w, h, out)` — buffer-backed, no real terminal; ideal for tests
   that inspect rendered output via `app.ReadCell(x, y)`.

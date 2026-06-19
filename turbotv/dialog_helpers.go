@@ -31,14 +31,26 @@ func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult f
 			onResult(value)
 		}
 	}
-	yes := NewButton("Yes", Rect{X: 12, Y: 4, W: 10, H: 1}, func() {
+	// Lay the buttons out in an HBox centred in the dialog, so their positions
+	// adapt to the dialog width instead of being hard-coded column numbers.
+	const buttonWidth = 10
+	buttonSpacing := 4
+	rowWidth := buttonWidth*2 + buttonSpacing
+	rowX := (width - 2 - rowWidth) / 2
+	if rowX < 0 {
+		rowX = 0
+	}
+	buttons := NewHBox(Rect{X: rowX, Y: 4, W: rowWidth, H: 1})
+	buttons.Spacing = buttonSpacing
+	yes := NewButton("Yes", Rect{X: 0, Y: 0, W: buttonWidth, H: 1}, func() {
 		closeDialog(true)
 	})
-	no := NewButton("No", Rect{X: 28, Y: 4, W: 10, H: 1}, func() {
+	no := NewButton("No", Rect{X: 0, Y: 0, W: buttonWidth, H: 1}, func() {
 		closeDialog(false)
 	})
-	dialog.Window.AddContent(yes)
-	dialog.Window.AddContent(no)
+	buttons.Add(yes)
+	buttons.Add(no)
+	dialog.Window.AddContent(buttons)
 
 	// Escape anywhere in the dialog cancels it (counts as "No").
 	dialog.Root().OnTypeFn = func(_ *VisualComponent, event tui.TypeEvent) bool {

@@ -24,8 +24,8 @@ var (
 
 func main() {
 	startTime := time.Now()
-	app, err := tui.New()
-	if err != nil {
+	app := tui.New()
+	if err := app.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize TUI: %v\n", err)
 		os.Exit(1)
 	}

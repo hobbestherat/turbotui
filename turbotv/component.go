@@ -21,6 +21,10 @@ type Widget interface {
 	Root() *VisualComponent
 }
 
+// VisualComponent is the retained-mode node shared by every tv widget: a bounds
+// rectangle, visibility/enabled/focus flags, parent/children links and the
+// draw/layout/input callbacks. Its zero value is invisible and inert (Visible
+// and Enabled are false), so always construct one with NewComponent.
 type VisualComponent struct {
 	Bounds      Rect
 	Visible     bool
@@ -28,6 +32,10 @@ type VisualComponent struct {
 	Focusable   bool
 	HasFocus    bool
 	DrawOutside bool
+	// Flex is the grow weight used by Box containers when distributing leftover
+	// space along their packing axis. Zero (the default) means the child keeps its
+	// natural Bounds size.
+	Flex int
 
 	Parent   *VisualComponent
 	Children []*VisualComponent
@@ -61,6 +69,12 @@ type VisualComponent struct {
 	OnMnemonicFn   MnemonicFn
 
 	mnemonicActive bool
+
+	// abs is the cached AbsoluteBounds() result and absCached marks it valid. It is
+	// recomputed lazily (and cached) on the first call after a bounds/parent
+	// change, so repeated calls within a frame are O(1) instead of O(depth).
+	abs       Rect
+	absCached bool
 }
 
 // MnemonicActive reports whether this component currently owns its mnemonic and
@@ -84,6 +98,7 @@ func (c *VisualComponent) Root() *VisualComponent {
 
 func (c *VisualComponent) SetBounds(bounds Rect) {
 	c.Bounds = bounds
+	c.invalidateAbs()
 	if c.LayoutFn != nil {
 		c.LayoutFn(c)
 	}
@@ -92,6 +107,7 @@ func (c *VisualComponent) SetBounds(bounds Rect) {
 func (c *VisualComponent) AddChild(child Widget) {
 	root := child.Root()
 	root.Parent = c
+	root.invalidateAbs()
 	c.Children = append(c.Children, root)
 }
 
@@ -101,6 +117,7 @@ func (c *VisualComponent) RemoveChild(child Widget) {
 	for _, existing := range c.Children {
 		if existing == root {
 			existing.Parent = nil
+			existing.invalidateAbs()
 			continue
 		}
 		next = append(next, existing)
@@ -108,17 +125,39 @@ func (c *VisualComponent) RemoveChild(child Widget) {
 	c.Children = next
 }
 
+// invalidateAbs marks this component's cached absolute bounds — and, since a
+// component's absolute position depends on every ancestor, the whole subtree's —
+// as stale, so the next AbsoluteBounds() call recomputes it. It is called
+// automatically on SetBounds/AddChild/RemoveChild.
+func (c *VisualComponent) invalidateAbs() {
+	c.absCached = false
+	for _, child := range c.Children {
+		child.invalidateAbs()
+	}
+}
+
+// AbsoluteBounds returns the component's bounds in screen (root) coordinates by
+// walking up the parent chain. The result is memoized per frame: the first call
+// after a bounds or parent change does the O(depth) walk and caches the value,
+// and every later call (including the ones inside Draw and HitTestDeep) returns
+// the cache in O(1).
 func (c *VisualComponent) AbsoluteBounds() Rect {
+	if c.absCached {
+		return c.abs
+	}
 	if c.Parent == nil {
-		return c.Bounds
+		c.abs = c.Bounds
+	} else {
+		parent := c.Parent.AbsoluteBounds()
+		c.abs = Rect{
+			X: parent.X + c.Bounds.X,
+			Y: parent.Y + c.Bounds.Y,
+			W: c.Bounds.W,
+			H: c.Bounds.H,
+		}
 	}
-	parent := c.Parent.AbsoluteBounds()
-	return Rect{
-		X: parent.X + c.Bounds.X,
-		Y: parent.Y + c.Bounds.Y,
-		W: c.Bounds.W,
-		H: c.Bounds.H,
-	}
+	c.absCached = true
+	return c.abs
 }
 
 func (c *VisualComponent) Draw(surface Surface) {

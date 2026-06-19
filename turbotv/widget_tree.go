@@ -47,6 +47,11 @@ type Tree struct {
 	// the selection changes.
 	OnActivate func(*TreeNode)
 	OnSelect   func(*TreeNode)
+
+	// flatBuf is reused across flatten() calls so the visible-rows slice is not
+	// reallocated on every draw/click/scroll; it is recomputed (correctly) each
+	// call because it just walks the live node tree.
+	flatBuf []treeRow
 }
 
 // NewTree creates an empty tree view.
@@ -81,8 +86,13 @@ func (t *Tree) Selected() *TreeNode {
 	}
 	return nil
 }
+// flatten returns the currently visible rows (depth-first, skipping collapsed
+// subtrees). It reuses flatBuf across calls so the slice's backing array is not
+// reallocated on every draw/handler; the contents are recomputed each call from
+// the live node tree, so it always reflects the current expand/collapse state.
+// Callers must not retain the slice across another flatten() call.
 func (t *Tree) flatten() []treeRow {
-	var rows []treeRow
+	rows := t.flatBuf[:0]
 	var walk func(nodes []*TreeNode, depth int)
 	walk = func(nodes []*TreeNode, depth int) {
 		for _, n := range nodes {
@@ -93,6 +103,7 @@ func (t *Tree) flatten() []treeRow {
 		}
 	}
 	walk(t.Roots, 0)
+	t.flatBuf = rows
 	return rows
 }
 func (t *Tree) draw(component *VisualComponent, surface Surface) {
