@@ -1,6 +1,10 @@
 package tv
 
-import tui "github.com/hobbestherat/turbotui"
+import (
+	"strings"
+
+	tui "github.com/hobbestherat/turbotui"
+)
 
 type Surface struct {
 	app  *tui.App
@@ -37,15 +41,84 @@ func (s Surface) SetCell(x int, y int, cell tui.Cell) {
 	s.app.WriteCell(x, y, cell)
 }
 
+// WriteString draws text at (x,y), clipped to the surface's clip rect. It is
+// display-width aware: double-width glyphs advance two columns, combining marks
+// fold into the preceding glyph, and a wide glyph that would straddle the clip
+// edge is replaced by a blank so neighbouring widgets are never overdrawn.
 func (s Surface) WriteString(x int, y int, text string, style tui.Cell) {
 	column := x
+	lastBase := -1
 	for _, ch := range text {
-		if s.clip.Contains(column, y) {
-			style.Ch = ch
-			s.app.WriteCell(column, y, style)
+		width := tui.RuneWidth(ch)
+		if width == 0 {
+			if lastBase >= 0 && s.clip.Contains(lastBase, y) {
+				base := s.app.ReadCell(lastBase, y)
+				base.Combining += string(ch)
+				s.app.WriteCell(lastBase, y, base)
+			}
+			continue
 		}
-		column++
+		cell := style
+		cell.Combining = ""
+		switch {
+		case width >= 2 && s.clip.Contains(column, y) && s.clip.Contains(column+1, y):
+			cell.Ch = ch
+			s.app.WriteCell(column, y, cell)
+			lastBase = column
+		case width >= 2 && s.clip.Contains(column, y):
+			// The wide glyph straddles the clip boundary; blank the visible half.
+			cell.Ch = ' '
+			s.app.WriteCell(column, y, cell)
+			lastBase = -1
+		case width == 1 && s.clip.Contains(column, y):
+			cell.Ch = ch
+			s.app.WriteCell(column, y, cell)
+			lastBase = column
+		default:
+			lastBase = -1
+		}
+		column += width
 	}
+}
+
+// WriteStringClipped draws text but never beyond maxWidth terminal columns
+// (in addition to the surface clip), cutting on a glyph boundary so a
+// double-width character is never split. For an ellipsis on overflow, pass the
+// result of Truncate to WriteString instead.
+func (s Surface) WriteStringClipped(x int, y int, maxWidth int, text string, style tui.Cell) {
+	if maxWidth <= 0 {
+		return
+	}
+	s.WriteString(x, y, Truncate(text, maxWidth, ""), style)
+}
+
+// Truncate shortens text so it occupies at most maxWidth terminal columns,
+// appending ellipsis when it had to cut. It is width-aware and never splits a
+// double-width glyph across the boundary; combining marks stay with their base.
+func Truncate(text string, maxWidth int, ellipsis string) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if tui.StringWidth(text) <= maxWidth {
+		return text
+	}
+	ellipsisWidth := tui.StringWidth(ellipsis)
+	if ellipsisWidth > maxWidth {
+		ellipsis = ""
+		ellipsisWidth = 0
+	}
+	budget := maxWidth - ellipsisWidth
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		w := tui.RuneWidth(r)
+		if used+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String() + ellipsis
 }
 
 func (s Surface) Fill(rect Rect, cell tui.Cell) {

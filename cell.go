@@ -33,11 +33,20 @@ func RGBColor(r uint8, g uint8, b uint8) Color {
 }
 
 type Cell struct {
-	Ch        rune
+	Ch rune
+	// Combining holds any zero-width combining marks that follow Ch (e.g. a
+	// U+0301 acute accent) so the whole grapheme renders in this one cell. It is
+	// a string rather than a slice so Cell stays comparable for the flush diff.
+	Combining string
 	FG        Color
 	BG        Color
 	Bold      bool
 	Underline bool
+	// cont marks this cell as the right half (continuation) of a double-width
+	// glyph occupying the cell to its left. Continuation cells are skipped by the
+	// flush so the wide glyph is emitted once and the terminal advances over both
+	// columns on its own.
+	cont bool
 }
 
 func DefaultCell() Cell {

@@ -218,7 +218,77 @@ func (a *App) Clear(cell Cell) {
 	}
 }
 
+// WriteCell writes a single cell, accounting for the glyph's display width: a
+// double-width rune also lays down a continuation cell to its right, and writing
+// over either half of an existing wide glyph blanks its orphaned other half.
 func (a *App) WriteCell(x int, y int, cell Cell) {
+	cell.cont = false
+	width := RuneWidth(cell.Ch)
+	if width < 1 {
+		// A bare combining mark has nothing to attach to here; render it as a
+		// single placeholder column rather than collapsing the cell.
+		width = 1
+	}
+	a.place(x, y, cell, width)
+}
+
+// place writes cell at (x,y) as a glyph that occupies width columns (1 or 2),
+// keeping the cell model consistent with what the terminal will render.
+func (a *App) place(x int, y int, cell Cell, width int) {
+	a.clearWideAt(x, y)
+	if width >= 2 {
+		// A wide glyph that would straddle the right edge cannot be drawn without
+		// the terminal wrapping; substitute a blank so the row stays aligned.
+		if !a.back.inBounds(x+1, y) {
+			cell.Ch = ' '
+			cell.Combining = ""
+			a.setCellTracked(x, y, cell)
+			return
+		}
+		a.clearWideAt(x+1, y)
+		a.setCellTracked(x, y, cell)
+		a.setCellTracked(x+1, y, Cell{
+			Ch:        ' ',
+			FG:        cell.FG,
+			BG:        cell.BG,
+			Bold:      cell.Bold,
+			Underline: cell.Underline,
+			cont:      true,
+		})
+		return
+	}
+	a.setCellTracked(x, y, cell)
+}
+
+// clearWideAt blanks the dangling half of a wide glyph that an upcoming write to
+// (x,y) would partially overwrite, so a leftover continuation column or orphaned
+// left half never lingers on screen.
+func (a *App) clearWideAt(x int, y int) {
+	if !a.back.inBounds(x, y) {
+		return
+	}
+	current := a.back.get(x, y)
+	if current.cont {
+		if a.back.inBounds(x-1, y) {
+			base := a.back.get(x-1, y)
+			base.Ch = ' '
+			base.Combining = ""
+			a.setCellTracked(x-1, y, base)
+		}
+		return
+	}
+	if RuneWidth(current.Ch) >= 2 && a.back.inBounds(x+1, y) {
+		right := a.back.get(x+1, y)
+		if right.cont {
+			a.setCellTracked(x+1, y, Cell{Ch: ' ', FG: right.FG, BG: right.BG})
+		}
+	}
+}
+
+// setCellTracked writes a cell verbatim and invalidates the line-drawing cache
+// for that position. It performs no width handling and is the low-level write
+// shared by place and clearWideAt.
+func (a *App) setCellTracked(x int, y int, cell Cell) {
 	if cell.Ch == 0 {
 		cell.Ch = ' '
 	}
@@ -231,11 +301,35 @@ func (a *App) WriteCell(x int, y int, cell Cell) {
 
 func (a *App) WriteString(x int, y int, text string, style Cell) {
 	column := x
+	lastBase := -1
 	for _, ch := range text {
-		style.Ch = ch
-		a.WriteCell(column, y, style)
-		column++
+		width := RuneWidth(ch)
+		if width == 0 {
+			a.attachCombining(lastBase, y, ch)
+			continue
+		}
+		cell := style
+		cell.Ch = ch
+		cell.Combining = ""
+		a.place(column, y, cell, width)
+		lastBase = column
+		column += width
 	}
+}
+
+// attachCombining folds a zero-width mark into the base cell previously written
+// at (x,y) so the grapheme renders together. Marks with no base (e.g. a string
+// that opens with a combining char) are dropped.
+func (a *App) attachCombining(x int, y int, mark rune) {
+	if x < 0 || !a.back.inBounds(x, y) {
+		return
+	}
+	base := a.back.get(x, y)
+	if base.cont {
+		return
+	}
+	base.Combining += string(mark)
+	a.setCellTracked(x, y, base)
 }
 
 func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell) int {
@@ -253,7 +347,11 @@ func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell)
 			}
 			return
 		}
-		needed := len(word)
+		wordWidth := 0
+		for _, r := range word {
+			wordWidth += RuneWidth(r)
+		}
+		needed := wordWidth
 		if col > 0 {
 			needed++
 		}
@@ -263,17 +361,29 @@ func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell)
 		}
 		if col > 0 {
 			style.Ch = ' '
-			a.WriteCell(x+col, y+line, style)
+			style.Combining = ""
+			a.place(x+col, y+line, style, 1)
 			col++
 		}
+		lastBase := -1
 		for _, r := range word {
-			if col >= width {
+			runeWidth := RuneWidth(r)
+			if runeWidth == 0 {
+				if lastBase >= 0 {
+					a.attachCombining(x+lastBase, y+line, r)
+				}
+				continue
+			}
+			if col+runeWidth > width {
 				line++
 				col = 0
+				lastBase = -1
 			}
 			style.Ch = r
-			a.WriteCell(x+col, y+line, style)
-			col++
+			style.Combining = ""
+			a.place(x+col, y+line, style, runeWidth)
+			lastBase = col
+			col += runeWidth
 		}
 		word = word[:0]
 	}
@@ -326,6 +436,13 @@ func (a *App) Apply() error {
 			if a.front.cells[index] == next {
 				continue
 			}
+			// The continuation half of a wide glyph carries no output of its own;
+			// the wide glyph to its left already advanced the terminal over this
+			// column. Sync the front buffer and move on.
+			if next.cont {
+				a.front.cells[index] = next
+				continue
+			}
 			if next.Ch == 0 {
 				next.Ch = ' '
 			}
@@ -333,6 +450,9 @@ func (a *App) Apply() error {
 			codes := styleCodes(style, next)
 			output.WriteString(sgr(codes))
 			output.WriteRune(next.Ch)
+			if next.Combining != "" {
+				output.WriteString(next.Combining)
+			}
 			style = styleState{
 				valid:     true,
 				fg:        next.FG,
