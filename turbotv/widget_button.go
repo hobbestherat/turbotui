@@ -11,6 +11,7 @@ type Button struct {
 	FocusBG     tui.Color
 	Shadow      bool
 	ShadowColor tui.Color
+	ShadowStyle ShadowStyle
 	Pressed     bool
 	OnPress     func()
 	// Default marks the button that Enter activates when the keystroke reaches the
@@ -31,6 +32,7 @@ func NewButton(label string, bounds Rect, onPress func()) *Button {
 		FocusBG:     activeTheme.ButtonFocusBG,
 		Shadow:      true,
 		ShadowColor: activeTheme.ButtonShadow,
+		ShadowStyle: DefaultShadowStyle,
 		OnPress:     onPress,
 	}
 	button.Component = NewComponent(bounds)
@@ -66,7 +68,7 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	// do NOT: draw them through a face-bounds-clipped surface so a caption longer
 	// than the button can never bleed into neighbouring widgets.
 	if b.Shadow && !b.Pressed {
-		surface.DrawShadow(abs, b.ShadowColor)
+		surface.DrawShadow(abs, b.ShadowColor, b.ShadowStyle)
 	}
 	fg, bg := focusColors(component.Focused(), b.FG, b.BG, b.FocusFG, b.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg, Bold: true}

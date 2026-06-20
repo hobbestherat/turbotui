@@ -282,7 +282,7 @@ func (s *Select) ensureVisible() {
 
 func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 	rect := s.popupRect()
-	surface.DrawShadow(rect, activeTheme.WindowShadow)
+	surface.DrawShadow(rect, activeTheme.WindowShadow, DefaultShadowStyle)
 	surface.Fill(rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
 	surface.DrawBox(rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
 	inner := Rect{X: rect.X + 1, Y: rect.Y + 1, W: rect.W - 2, H: rect.H - 2}

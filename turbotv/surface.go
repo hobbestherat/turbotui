@@ -154,12 +154,57 @@ func (s Surface) DrawBox(rect Rect, line tui.LineKind, fg tui.Color, bg tui.Colo
 	s.SetCell(right, bottom, tui.Cell{Ch: chars.BottomRight, FG: fg, BG: bg, Bold: true})
 }
 
-func (s Surface) DrawShadow(rect Rect, color tui.Color) {
-	for y := rect.Y + 1; y <= rect.Bottom()+1; y++ {
-		s.drawShadowCell(rect.Right()+1, y, color)
+// ShadowStyle controls drop-shadow geometry: how far the shadow's corner notch
+// is offset from the element's top-left-lit edges and how thick its right and
+// bottom bands are. The default (DefaultShadowStyle) follows the classic
+// Turbo-Vision proportion — a 2-column right band balancing a 1-row bottom band
+// — so the shadow hugs the frame and still reads as balanced despite the ~2:1
+// tall:wide terminal cell aspect ratio. Override DefaultShadowStyle before
+// building the UI, or set a widget's ShadowStyle field, to adjust it.
+type ShadowStyle struct {
+	// OffsetX, OffsetY set the corner notch: the right band starts OffsetY rows
+	// below the element's top edge and the bottom band starts OffsetX columns to
+	// the right of its left edge, so the top-left corner reads as lit. 1 is the
+	// snug classic value; larger values open the notch wider.
+	OffsetX int
+	OffsetY int
+	// RightWidth, BottomHeight are the band thicknesses in cells. The bands always
+	// hug the frame (their near edge is the cell immediately past the element), so
+	// these control how heavy the shadow looks, not how detached it is.
+	RightWidth   int
+	BottomHeight int
+}
+
+// DefaultShadowStyle is the geometry new widgets seed their ShadowStyle from. The
+// 2:1 right:bottom proportion compensates for the terminal cell aspect ratio so
+// the L-shaped shadow looks balanced and snug.
+var DefaultShadowStyle = ShadowStyle{
+	OffsetX:      1,
+	OffsetY:      1,
+	RightWidth:   2,
+	BottomHeight: 1,
+}
+
+// DrawShadow paints an L-shaped drop shadow hugging the element's right and
+// bottom edges. The bands always start at the cell immediately past the element
+// (so the shadow never reads as detached); style controls their thickness and
+// the top-left corner notch. A zero-thickness band is simply omitted.
+func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
+	right := rect.Right()
+	bottom := rect.Bottom()
+	// Right band: a vertical strip RightWidth columns wide just past the right
+	// edge, started OffsetY rows down so the lit corner stays open.
+	for dx := 1; dx <= style.RightWidth; dx++ {
+		for y := rect.Y + style.OffsetY; y <= bottom+style.BottomHeight; y++ {
+			s.drawShadowCell(right+dx, y, color)
+		}
 	}
-	for x := rect.X + 1; x <= rect.Right()+1; x++ {
-		s.drawShadowCell(x, rect.Bottom()+1, color)
+	// Bottom band: a horizontal strip BottomHeight rows tall just past the bottom
+	// edge, started OffsetX columns in from the left for the same reason.
+	for dy := 1; dy <= style.BottomHeight; dy++ {
+		for x := rect.X + style.OffsetX; x <= right+style.RightWidth; x++ {
+			s.drawShadowCell(x, bottom+dy, color)
+		}
 	}
 }
 

@@ -20,6 +20,7 @@ type Window struct {
 	CloseBG     tui.Color
 	Shadow      bool
 	ShadowColor tui.Color
+	ShadowStyle ShadowStyle
 	OnClose     func(*Window)
 	// Resizable, when true, draws a corner grip and lets the user drag the
 	// bottom-right corner to resize the window (opt-in).
@@ -79,6 +80,7 @@ func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 		CloseBG:     activeTheme.CloseButtonBG,
 		Shadow:      true,
 		ShadowColor: activeTheme.WindowShadow,
+		ShadowStyle: DefaultShadowStyle,
 		MinWidth:    12,
 		MinHeight:   3,
 	}
@@ -348,7 +350,7 @@ func (w *Window) draw(component *VisualComponent, surface Surface) {
 		return
 	}
 	if w.Shadow {
-		surface.DrawShadow(abs, w.ShadowColor)
+		surface.DrawShadow(abs, w.ShadowColor, w.ShadowStyle)
 	}
 	surface.DrawBox(abs, w.Border, w.BorderFG, w.BorderBG)
 	buttons := w.titleButtons(abs)

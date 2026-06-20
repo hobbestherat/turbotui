@@ -102,6 +102,7 @@ type MenuBar struct {
 	SelectBG  tui.Color
 	Shadow    bool
 	ShadowCol tui.Color
+	ShadowSty ShadowStyle
 
 	openPath     []int
 	hoverPath    []int
@@ -129,6 +130,7 @@ func NewMenuBar(bounds Rect, menus ...*MenuItem) *MenuBar {
 		SelectBG:  activeTheme.MenuSelectBG,
 		Shadow:    true,
 		ShadowCol: activeTheme.MenuShadow,
+		ShadowSty: DefaultShadowStyle,
 		openPath:  []int{},
 		hoverPath: []int{},
 	}
@@ -174,7 +176,7 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 	m.popupLayouts = m.layoutPopups(clip.X+clip.W, clip.Y+clip.H)
 	for _, popup := range m.popupLayouts {
 		if m.Shadow {
-			surface.DrawShadow(popup.rect, m.ShadowCol)
+			surface.DrawShadow(popup.rect, m.ShadowCol, m.ShadowSty)
 		}
 		surface.Fill(popup.rect, tui.Cell{Ch: ' ', FG: m.FG, BG: m.BG})
 		surface.DrawBox(popup.rect, tui.LineSingle, m.FG, m.BG)
