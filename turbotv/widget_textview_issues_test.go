@@ -192,3 +192,36 @@ func TestTextViewPageScrollsByViewport(t *testing.T) {
 		t.Fatalf("PageDown should return to the bottom (40), got %d", view.scrollY)
 	}
 }
+
+func TestTextViewScrollToTopAnchorsAtTop(t *testing.T) {
+	const h = 10
+	desktop, view := setupTextView(40, h, Rect{X: 0, Y: 0, W: 20, H: h})
+	view.Wrap = false
+	var lines []string
+	for i := 0; i < 50; i++ {
+		lines = append(lines, "row")
+	}
+	view.SetText(strings.Join(lines, "\n"))
+	desktop.Redraw() // following -> pinned to the bottom (max offset 40)
+	if view.scrollY != 40 {
+		t.Fatalf("precondition: expected scrollY pinned to bottom (40), got %d", view.scrollY)
+	}
+
+	// ScrollToTop anchors at the first line and stops following.
+	view.ScrollToTop()
+	if view.scrollY != 0 {
+		t.Fatalf("ScrollToTop should set scrollY=0, got %d", view.scrollY)
+	}
+	desktop.Redraw() // a redraw must NOT re-pin to the bottom once following is off
+	if view.scrollY != 0 {
+		t.Fatalf("after ScrollToTop a redraw must stay at the top, got scrollY=%d", view.scrollY)
+	}
+
+	// ScrollToBottom re-enables following: adding content re-pins to the bottom.
+	view.ScrollToBottom()
+	view.AddLine("row")
+	desktop.Redraw()
+	if view.scrollY != 41 {
+		t.Fatalf("ScrollToBottom + new content should re-pin to the bottom (41), got %d", view.scrollY)
+	}
+}
