@@ -580,10 +580,9 @@ func TestAddStyledWideGlyphAdvancesTwoColumns(t *testing.T) {
 //
 // (Regression guard: an earlier per-cell SetCell implementation rendered the mark
 // as a stray 1-column glyph and shifted every following char right. The current
-// per-span WriteString path folds it correctly. Residual edge, not asserted here:
-// a mark placed at the START of a span whose base is in the PREVIOUS span is
-// dropped, since each span is a separate WriteString call \u2014 pathological for
-// Markdown, where a mark always shares its base's styled run.)
+// per-span WriteString path folds it correctly; a mark at the start of a span
+// whose base is in the previous span is migrated onto that base, so it folds
+// across span boundaries too \u2014 see TestAddStyledCombiningMarkFoldsAcrossSpanBoundary.)
 func TestAddStyledCombiningMarkFoldsIntoBase(t *testing.T) {
 	decomposed := "e\u0301x" // 'e' + combining acute (U+0301) + 'x'
 	view := NewTextView("", Rect{X: 0, Y: 0, W: 10, H: 2})
@@ -637,6 +636,64 @@ func TestAddStyledSingleSpanMatchesPlainForTrickyContent(t *testing.T) {
 	// Sanity: the wide glyph advanced two columns (combining mark folded, 'x' at col 3).
 	if got := sapp.ReadCell(3, 0).Ch; got != 'x' {
 		t.Fatalf("cell(3,0) = %q, want 'x' (acute folded + wide glyph advanced 2 cols)", got)
+	}
+}
+
+// A combining mark at the START of a span whose base glyph is in the PREVIOUS
+// span must still fold onto that base. drawStyledRow migrates a span's leading
+// zero-width runes onto the previous segment's text so WriteString attaches them
+// to its last base glyph — otherwise the mark would be dropped at the WriteString
+// seam. (Regression guard for the round-2 leading-mark migration.)
+func TestAddStyledCombiningMarkFoldsAcrossSpanBoundary(t *testing.T) {
+	view := NewTextView("", Rect{X: 0, Y: 0, W: 10, H: 2})
+	view.FG = tui.ANSIColor(7)
+	view.BG = tui.ANSIColor(0)
+	acute := "\u0301" // combining acute
+	view.AddStyled([]StyledSpan{
+		{Text: "e", FG: tui.ANSIColor(1), HasFG: true},         // base glyph
+		{Text: acute + "x", FG: tui.ANSIColor(2), HasFG: true}, // U+0301 + 'x'
+	})
+	app := drawTextView(view, 10, 2)
+
+	base := app.ReadCell(0, 0)
+	if base.Ch != 'e' {
+		t.Fatalf("base cell = %q, want 'e'", base.Ch)
+	}
+	if !strings.ContainsRune(base.Combining, '\u0301') {
+		t.Fatalf("combining acute not folded across span boundary, Combining=%q", base.Combining)
+	}
+	// 'x' (span 1) still lands at column 1; the mark consumed no column.
+	if got := app.ReadCell(1, 0); got.Ch != 'x' || got.FG != tui.ANSIColor(2) {
+		t.Fatalf("cell(1,0) = %q fg %v, want 'x' fg %v", got.Ch, got.FG, tui.ANSIColor(2))
+	}
+}
+
+// When a styled row is clipped, a span whose trailing wide glyph does not fit
+// must not let a LATER, narrower span leak into the freed column. drawStyledRow
+// stops once any segment is truncated, so the row is filled as one unit. (Regression
+// guard for the round-2 stop-on-truncation fix.)
+func TestAddStyledWideGlyphOverflowDoesNotLeakLaterSpan(t *testing.T) {
+	view := NewTextView("", Rect{X: 0, Y: 0, W: 3, H: 2})
+	view.Wrap = false
+	view.FG = tui.ANSIColor(7)
+	view.BG = tui.ANSIColor(0)
+	view.AddStyled([]StyledSpan{
+		{Text: "ab世", FG: tui.ANSIColor(1), HasFG: true}, // 'ab' fits; wide '世' (2 cols) is clipped
+		{Text: "cd", FG: tui.ANSIColor(2), HasFG: true},  // narrow span that must NOT leak into col 2
+	})
+	app := drawTextView(view, 3, 2)
+
+	// "ab" fills the first two columns with span 0's colour.
+	if got := app.ReadCell(0, 0); got.Ch != 'a' || got.FG != tui.ANSIColor(1) {
+		t.Fatalf("cell(0,0) = %q fg %v, want 'a' span0", got.Ch, got.FG)
+	}
+	if got := app.ReadCell(1, 0); got.Ch != 'b' {
+		t.Fatalf("cell(1,0) = %q, want 'b'", got.Ch)
+	}
+	// Column 2 stays the fill blank: the clipped span stopped drawing, so span 1's
+	// 'c' cannot leak into the column (without the fix it would render here).
+	if got := app.ReadCell(2, 0); got.Ch != ' ' {
+		t.Fatalf("cell(2,0) = %q, want blank (later span must not leak after a clipped wide glyph)", got.Ch)
 	}
 }
 
