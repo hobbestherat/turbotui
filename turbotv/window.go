@@ -48,14 +48,14 @@ func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 		Title:       title,
 		Border:      border,
 		ShowClose:   true,
-		TitleFG:     DefaultTheme.WindowTitleFG,
-		TitleBG:     DefaultTheme.WindowTitleBG,
-		BorderFG:    DefaultTheme.WindowBorderFG,
-		BorderBG:    DefaultTheme.WindowBorderBG,
-		CloseFG:     DefaultTheme.CloseButtonFG,
-		CloseBG:     DefaultTheme.CloseButtonBG,
+		TitleFG:     activeTheme.WindowTitleFG,
+		TitleBG:     activeTheme.WindowTitleBG,
+		BorderFG:    activeTheme.WindowBorderFG,
+		BorderBG:    activeTheme.WindowBorderBG,
+		CloseFG:     activeTheme.CloseButtonFG,
+		CloseBG:     activeTheme.CloseButtonBG,
 		Shadow:      true,
-		ShadowColor: DefaultTheme.WindowShadow,
+		ShadowColor: activeTheme.WindowShadow,
 		MinWidth:    12,
 		MinHeight:   3,
 	}
@@ -69,7 +69,7 @@ func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 	inner := Rect{W: bounds.W, H: bounds.H}.Inset(1)
 	window.Content = NewComponent(inner)
 	window.Content.UseBackground = true
-	window.Content.Background = tui.Cell{Ch: ' ', FG: DefaultTheme.WindowFG, BG: DefaultTheme.WindowBG}
+	window.Content.Background = tui.Cell{Ch: ' ', FG: activeTheme.WindowFG, BG: activeTheme.WindowBG}
 	window.BottomBar = NewComponent(Rect{X: inner.X, Y: inner.Bottom(), W: inner.W, H: 1})
 	window.BottomBar.Visible = false
 	window.Component.AddChild(window.Content)

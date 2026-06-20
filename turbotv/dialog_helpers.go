@@ -20,8 +20,9 @@ func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult f
 	dialog.Window.ShowClose = false
 
 	label := NewLabel(message, Rect{X: 2, Y: 1, W: width - 4, H: 2})
-	label.FG = DefaultTheme.DialogFG
-	label.BG = DefaultTheme.DialogBG
+	label.FG = activeTheme.DialogFG
+	label.BG = activeTheme.DialogBG
+	label.HotFG = activeTheme.DialogMnemonicFG
 	dialog.Window.AddContent(label)
 
 	var layer *Layer

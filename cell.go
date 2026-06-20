@@ -66,6 +66,9 @@ func (c Color) bgCode() string {
 }
 
 func colorCode(c Color, fg bool) string {
+	// Degrade the logical colour to what the active terminal can render
+	// (NO_COLOR strips it entirely; truecolor passes through unchanged).
+	c = adaptColor(c, GetColorLevel())
 	switch c.Mode {
 	case ColorANSI:
 		index := int(c.Value)

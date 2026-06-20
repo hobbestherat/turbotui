@@ -20,10 +20,10 @@ type Checkbox struct {
 func NewCheckbox(label string, bounds Rect, onToggle func(bool)) *Checkbox {
 	cb := &Checkbox{
 		Label:    label,
-		FG:       DefaultTheme.WindowFG,
-		BG:       DefaultTheme.WindowBG,
-		FocusFG:  DefaultTheme.InputFocusFG,
-		FocusBG:  DefaultTheme.InputFocusBG,
+		FG:       activeTheme.WindowFG,
+		BG:       activeTheme.WindowBG,
+		FocusFG:  activeTheme.InputFocusFG,
+		FocusBG:  activeTheme.InputFocusBG,
 		OnToggle: onToggle,
 	}
 	cb.Component = NewComponent(bounds)
@@ -59,7 +59,7 @@ func (c *Checkbox) draw(component *VisualComponent, surface Surface) {
 		box = "[x] "
 	}
 	surface.WriteString(abs.X, abs.Y, box, tui.Cell{FG: fg, BG: bg, Bold: true})
-	drawMnemonic(surface, abs.X+4, abs.Y, c.Label, style, component.mnemonicActive, DefaultTheme.MnemonicFG)
+	drawMnemonic(surface, abs.X+4, abs.Y, c.Label, style, component.mnemonicActive, activeTheme.MnemonicFG)
 }
 func (c *Checkbox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	if event.Key == tui.KeyEnter || (event.Key == tui.KeyRune && event.Rune == ' ') {

@@ -21,10 +21,10 @@ func NewTextBox(text string, bounds Rect) *TextBox {
 	box := &TextBox{
 		Text:      []rune(text),
 		Cursor:    len([]rune(text)),
-		FG:        DefaultTheme.InputFG,
-		BG:        DefaultTheme.InputBG,
-		FocusFG:   DefaultTheme.InputFocusFG,
-		FocusBG:   DefaultTheme.InputFocusBG,
+		FG:        activeTheme.InputFG,
+		BG:        activeTheme.InputBG,
+		FocusFG:   activeTheme.InputFocusFG,
+		FocusBG:   activeTheme.InputFocusBG,
 		selAnchor: -1,
 	}
 	box.Component = NewComponent(bounds)
@@ -73,8 +73,8 @@ func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 		cell := textStyle
 		cell.Ch = t.Text[index]
 		if index >= selLo && index < selHi {
-			cell.FG = DefaultTheme.SelectionFG
-			cell.BG = DefaultTheme.SelectionBG
+			cell.FG = activeTheme.SelectionFG
+			cell.BG = activeTheme.SelectionBG
 		}
 		surface.SetCell(abs.X+offset, abs.Y, cell)
 	}

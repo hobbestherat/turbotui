@@ -191,9 +191,23 @@ a `tv.NewDialog(...)`, add widgets, and push it with `tv.NewModalLayer(...)`.
 
 ## Theming
 
-`desktop.SetTheme(theme)` accepts a `tv.Theme` (start from `tv.DefaultTheme` and
-override fields). It controls window/desktop/button/input/dialog colours, the
-mnemonic highlight colour, button focus colours, and more.
+`desktop.SetTheme(theme)` (or the package-level `tv.SetTheme(theme)`) accepts a
+`tv.Theme` (start from `tv.DefaultTheme` and override fields). It controls
+window/desktop/button/input/dialog colours, the mnemonic highlight colours, menu
+chrome (`MenuBar*`/`MenuHot*`/`MenuSelect*`/`MenuShadow`), button focus colours,
+and more. Call it **before** building the UI so every widget seeds from it; chrome
+resolved at draw time (desktop background, menus, dropdown popups, selections)
+reflects a swap immediately. `tv.ActiveTheme()` returns the current palette.
+
+`tv.HighContrastTheme` is a built-in black/white, colour-blind-safe preset.
+
+### Colour capability & NO_COLOR
+
+The renderer detects the terminal's colour support at startup
+(`tui.DetectColorLevel`, from `COLORTERM`/`TERM`) and downsamples truecolor/256
+themes to what the terminal can show. The [`NO_COLOR`](https://no-color.org/)
+convention is honoured: when `NO_COLOR` is set to a non-empty value (or `TERM` is
+`dumb`) all colour is suppressed. Force a level with `tui.SetColorLevel(...)`.
 
 ## Building your own widget
 

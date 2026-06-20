@@ -18,12 +18,12 @@ type Button struct {
 func NewButton(label string, bounds Rect, onPress func()) *Button {
 	button := &Button{
 		Label:       label,
-		FG:          DefaultTheme.ButtonFG,
-		BG:          DefaultTheme.ButtonBG,
-		FocusFG:     DefaultTheme.ButtonFocusFG,
-		FocusBG:     DefaultTheme.ButtonFocusBG,
+		FG:          activeTheme.ButtonFG,
+		BG:          activeTheme.ButtonBG,
+		FocusFG:     activeTheme.ButtonFocusFG,
+		FocusBG:     activeTheme.ButtonFocusBG,
 		Shadow:      true,
-		ShadowColor: DefaultTheme.ButtonShadow,
+		ShadowColor: activeTheme.ButtonShadow,
 		OnPress:     onPress,
 	}
 	button.Component = NewComponent(bounds)
@@ -74,7 +74,7 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	if start < face.X {
 		start = face.X
 	}
-	drawMnemonic(surface, start, face.Y, left+b.Label+right, style, component.mnemonicActive, DefaultTheme.MnemonicFG)
+	drawMnemonic(surface, start, face.Y, left+b.Label+right, style, component.mnemonicActive, activeTheme.MnemonicFG)
 }
 
 func (b *Button) press() bool {

@@ -72,14 +72,14 @@ type menuPopupLayout struct {
 func NewMenuBar(bounds Rect, menus ...*MenuItem) *MenuBar {
 	bar := &MenuBar{
 		Menus:     menus,
-		FG:        tui.ANSIColor(0),
-		BG:        tui.ANSIColor(7),
-		HotFG:     tui.ANSIColor(9),
-		HotBG:     tui.ANSIColor(7),
-		SelectFG:  tui.ANSIColor(15),
-		SelectBG:  tui.ANSIColor(4),
+		FG:        activeTheme.MenuBarFG,
+		BG:        activeTheme.MenuBarBG,
+		HotFG:     activeTheme.MenuHotFG,
+		HotBG:     activeTheme.MenuHotBG,
+		SelectFG:  activeTheme.MenuSelectFG,
+		SelectBG:  activeTheme.MenuSelectBG,
 		Shadow:    true,
-		ShadowCol: DefaultTheme.WindowShadow,
+		ShadowCol: activeTheme.MenuShadow,
 		openPath:  []int{},
 		hoverPath: []int{},
 	}

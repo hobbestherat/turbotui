@@ -87,9 +87,9 @@ type TextView struct {
 
 func NewTextView(text string, bounds Rect) *TextView {
 	view := &TextView{
-		FG:      DefaultTheme.WindowFG,
-		BG:      DefaultTheme.WindowBG,
-		FocusFG: DefaultTheme.MnemonicFG,
+		FG:      activeTheme.WindowFG,
+		BG:      activeTheme.WindowBG,
+		FocusFG: activeTheme.MnemonicFG,
 		follow:  true,
 	}
 	view.Component = NewComponent(bounds)

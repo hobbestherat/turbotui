@@ -13,9 +13,9 @@ type Label struct {
 func NewLabel(text string, bounds Rect) *Label {
 	label := &Label{
 		Text:  text,
-		FG:    DefaultTheme.WindowFG,
-		BG:    DefaultTheme.WindowBG,
-		HotFG: DefaultTheme.MnemonicFG,
+		FG:    activeTheme.WindowFG,
+		BG:    activeTheme.WindowBG,
+		HotFG: activeTheme.MnemonicFG,
 	}
 	label.Component = NewComponent(bounds)
 	label.Component.DrawFn = label.draw

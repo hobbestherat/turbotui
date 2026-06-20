@@ -1,6 +1,10 @@
 package tv
 
-import tui "github.com/hobbestherat/turbotui"
+import (
+	"unicode"
+
+	tui "github.com/hobbestherat/turbotui"
+)
 
 // inputColors picks the foreground/background pair for an input widget based on
 // whether it currently has focus.
@@ -57,12 +61,16 @@ func drawMnemonic(surface Surface, x int, y int, label string, style tui.Cell, h
 	if hot >= len(runes) {
 		return
 	}
-	surface.SetCell(x+hot, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+	// hot is a rune index, but the highlight must land on a column: sum the
+	// display width of everything before it so a leading double-width (CJK) or
+	// combining rune doesn't shift the highlight onto the wrong cell.
+	col := x + tui.StringWidth(string(runes[:hot]))
+	surface.SetCell(col, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
 }
 
+// unicodeLower folds a rune to lower case for mnemonic matching. It uses
+// unicode.ToLower so capitals whose lowercase differs in code point (e.g. 'İ',
+// 'ẞ', accented Latin) round-trip correctly, not just ASCII A-Z.
 func unicodeLower(value rune) rune {
-	if value >= 'A' && value <= 'Z' {
-		return value - 'A' + 'a'
-	}
-	return value
+	return unicode.ToLower(value)
 }

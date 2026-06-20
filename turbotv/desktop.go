@@ -21,7 +21,7 @@ func NewDesktop(app *tui.App) *Desktop {
 	desktop := &Desktop{
 		app:            app,
 		theme:          DefaultTheme,
-		backgroundCell: tui.Cell{Ch: ' ', FG: DefaultTheme.DesktopFG, BG: DefaultTheme.DesktopBG},
+		backgroundCell: tui.Cell{Ch: ' ', FG: activeTheme.DesktopFG, BG: activeTheme.DesktopBG},
 	}
 	app.OnResize(func(_ tui.ResizeEvent) {
 		desktop.Redraw()
@@ -63,6 +63,9 @@ func (d *Desktop) Theme() Theme {
 
 func (d *Desktop) SetTheme(theme Theme) {
 	d.theme = theme
+	// Keep the package-level active theme in step so newly constructed widgets
+	// and draw-time chrome (menus, popups, selections) resolve the same palette.
+	SetTheme(theme)
 	d.backgroundCell = tui.Cell{Ch: ' ', FG: theme.DesktopFG, BG: theme.DesktopBG}
 }
 

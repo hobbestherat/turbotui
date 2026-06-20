@@ -25,10 +25,10 @@ type Select struct {
 func NewSelect(desktop *Desktop, options []string, bounds Rect) *Select {
 	s := &Select{
 		Options: options,
-		FG:      DefaultTheme.InputFG,
-		BG:      DefaultTheme.InputBG,
-		FocusFG: DefaultTheme.InputFocusFG,
-		FocusBG: DefaultTheme.InputFocusBG,
+		FG:      activeTheme.InputFG,
+		BG:      activeTheme.InputBG,
+		FocusFG: activeTheme.InputFocusFG,
+		FocusBG: activeTheme.InputFocusBG,
 		desktop: desktop,
 	}
 	s.Component = NewComponent(bounds)
@@ -180,9 +180,9 @@ func (s *Select) viewOffset() int {
 
 func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 	rect := s.popupRect()
-	surface.DrawShadow(rect, DefaultTheme.WindowShadow)
-	surface.Fill(rect, tui.Cell{Ch: ' ', FG: DefaultTheme.DialogFG, BG: DefaultTheme.DialogBG})
-	surface.DrawBox(rect, tui.LineSingle, DefaultTheme.DialogBorderFG, DefaultTheme.DialogBG)
+	surface.DrawShadow(rect, activeTheme.WindowShadow)
+	surface.Fill(rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
+	surface.DrawBox(rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
 	inner := Rect{X: rect.X + 1, Y: rect.Y + 1, W: rect.W - 2, H: rect.H - 2}
 	offset := s.viewOffset()
 	// When the list is taller than the visible area, reserve the last column for
@@ -197,7 +197,7 @@ func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 		if index >= len(s.Options) {
 			break
 		}
-		fg, bg := DefaultTheme.DialogFG, DefaultTheme.DialogBG
+		fg, bg := activeTheme.DialogFG, activeTheme.DialogBG
 		if index == s.highlight {
 			fg, bg = tui.ANSIColor(15), tui.ANSIColor(4)
 		}
@@ -212,7 +212,7 @@ func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 	if scrollbar {
 		track := Rect{X: inner.X + inner.W - 1, Y: inner.Y, W: 1, H: inner.H}
 		drawVScrollbar(surface, track, len(s.Options), inner.H, offset,
-			DefaultTheme.DialogBorderFG, DefaultTheme.DialogBG, true)
+			activeTheme.DialogBorderFG, activeTheme.DialogBG, true)
 	}
 }
 

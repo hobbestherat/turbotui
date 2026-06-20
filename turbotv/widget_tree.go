@@ -57,10 +57,10 @@ type Tree struct {
 // NewTree creates an empty tree view.
 func NewTree(bounds Rect) *Tree {
 	t := &Tree{
-		FG:    DefaultTheme.WindowFG,
-		BG:    DefaultTheme.WindowBG,
-		SelFG: DefaultTheme.SelectionFG,
-		SelBG: DefaultTheme.SelectionBG,
+		FG:    activeTheme.WindowFG,
+		BG:    activeTheme.WindowBG,
+		SelFG: activeTheme.SelectionFG,
+		SelBG: activeTheme.SelectionBG,
 	}
 	t.Component = NewComponent(bounds)
 	t.Component.Focusable = true
@@ -86,6 +86,7 @@ func (t *Tree) Selected() *TreeNode {
 	}
 	return nil
 }
+
 // flatten returns the currently visible rows (depth-first, skipping collapsed
 // subtrees). It reuses flatBuf across calls so the slice's backing array is not
 // reallocated on every draw/handler; the contents are recomputed each call from
@@ -153,7 +154,7 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 	if needBar {
 		track := Rect{X: abs.X + abs.W - 1, Y: abs.Y, W: 1, H: abs.H}
 		drawVScrollbar(surface, track, len(rows), abs.H, t.offset,
-			DefaultTheme.WindowBorderFG, t.BG, component.HasFocus)
+			activeTheme.WindowBorderFG, t.BG, component.HasFocus)
 	}
 }
 func (t *Tree) clampSelection(total int) {

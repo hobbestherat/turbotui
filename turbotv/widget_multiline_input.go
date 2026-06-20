@@ -59,10 +59,10 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 		Lines:      lines,
 		CursorX:    len([]rune(lines[len(lines)-1])),
 		CursorY:    len(lines) - 1,
-		FG:         DefaultTheme.InputFG,
-		BG:         DefaultTheme.InputBG,
-		FocusFG:    DefaultTheme.InputFocusFG,
-		FocusBG:    DefaultTheme.InputFocusBG,
+		FG:         activeTheme.InputFG,
+		BG:         activeTheme.InputBG,
+		FocusFG:    activeTheme.InputFocusFG,
+		FocusBG:    activeTheme.InputFocusBG,
 		SubmitMode: MultiLineSubmitOnEnter,
 		selAnchorY: -1,
 	}
@@ -122,8 +122,8 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 			cell := style
 			cell.Ch = wrapped.runes[col]
 			if m.isSelected(wrapped.line, wrapped.start+col) {
-				cell.FG = DefaultTheme.SelectionFG
-				cell.BG = DefaultTheme.SelectionBG
+				cell.FG = activeTheme.SelectionFG
+				cell.BG = activeTheme.SelectionBG
 			}
 			surface.SetCell(abs.X+col, abs.Y+row, cell)
 		}
