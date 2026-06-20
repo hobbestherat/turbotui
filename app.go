@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -87,6 +88,15 @@ type App struct {
 	in      *os.File
 	out     io.Writer
 	termOut *os.File
+
+	// writeMu serializes raw writes to out so a CopyToClipboard call from a
+	// background goroutine cannot interleave its OSC 52 bytes with an Apply
+	// frame and corrupt the escape stream.
+	writeMu sync.Mutex
+
+	// clipboardBackend selects how CopyToClipboard delivers text. Its zero value
+	// is ClipboardOSC52AndNative.
+	clipboardBackend ClipboardBackend
 
 	width  int
 	height int
@@ -537,7 +547,9 @@ func (a *App) Apply() error {
 	if output.Len() == 0 {
 		return nil
 	}
+	a.writeMu.Lock()
 	_, err := io.WriteString(a.out, output.String())
+	a.writeMu.Unlock()
 	if err != nil {
 		// The terminal went away (broken pipe, redirected/closed stdout, …).
 		// Record it so Run can exit cleanly and surface it to any callback
