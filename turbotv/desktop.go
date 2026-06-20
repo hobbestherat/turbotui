@@ -16,6 +16,9 @@ type Desktop struct {
 	menuBar        *MenuBar
 	unhandledKeyFn func(event tui.TypeEvent)
 	workArea       Rect
+	// cancel stops the run loop; it backs the default Ctrl+C quit (issue #75) and is
+	// set by Run.
+	cancel context.CancelFunc
 }
 
 func NewDesktop(app *tui.App) *Desktop {
@@ -39,6 +42,13 @@ func NewDesktop(app *tui.App) *Desktop {
 	app.OnPaste(func(event tui.PasteEvent) {
 		desktop.handlePaste(event)
 	})
+	// Drive coalesced redraws (issue #17): the run loop calls this at most once per
+	// iteration after draining a burst of posts, instead of one Apply per post.
+	app.SetRedrawFn(func() {
+		desktop.compose()
+		desktop.updateCursor()
+		_ = desktop.app.Apply()
+	})
 	return desktop
 }
 
@@ -46,15 +56,17 @@ func (d *Desktop) App() *tui.App {
 	return d.app
 }
 
-// Post runs fn on the event-loop goroutine and then redraws. Background tasks use
-// it to safely update widgets (e.g. streaming text) and refresh the screen.
+// Post runs fn on the event-loop goroutine and then requests a redraw. Background
+// tasks use it to safely update widgets (e.g. streaming text) and refresh the
+// screen. The redraw is coalesced: a burst of posts results in a single recompose
+// and a single terminal write rather than one per post (issue #17).
 func (d *Desktop) Post(fn func()) {
 	if fn == nil {
 		return
 	}
 	d.app.Post(func() {
 		fn()
-		d.Redraw()
+		d.app.RequestRedraw()
 	})
 }
 
@@ -298,9 +310,20 @@ func (d *Desktop) compose() {
 }
 
 func (d *Desktop) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	d.cancel = cancel
+	defer cancel()
 	d.compose()
 	d.updateCursor()
 	return d.app.Run(ctx)
+}
+
+// Quit stops the run loop. It is what the default Ctrl+C handler calls and is safe
+// to invoke from a handler or a Post callback.
+func (d *Desktop) Quit() {
+	if d.cancel != nil {
+		d.cancel()
+	}
 }
 
 func (d *Desktop) handleClick(event tui.ClickEvent) {
@@ -426,13 +449,29 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	}
 	if d.unhandledKeyFn != nil {
 		d.unhandledKeyFn(event)
+		return
 	}
+	// With no app-supplied handler, Ctrl+C is the conventional interrupt. Raw mode
+	// swallows the SIGINT terminals would normally send, so without this default
+	// Ctrl+C would do nothing and the app would feel hung (issue #75). It only
+	// reaches here when no focused widget consumed it for copy.
+	if isQuitKey(event) {
+		d.Quit()
+	}
+}
+
+// isQuitKey reports the default quit chord: Ctrl+C (with or without Shift, since
+// many terminals cannot distinguish Ctrl+C from Ctrl+Shift+C).
+func isQuitKey(event tui.TypeEvent) bool {
+	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'c'
 }
 
 // SetUnhandledKeyFn registers a callback invoked when a key event was not
 // consumed by the menu, focus navigation, copy, or the focused widget. Apps use
 // it for global shortcuts (e.g. a Ctrl+C quit confirmation) without racing the
-// widgets that might legitimately want the same key.
+// widgets that might legitimately want the same key. Registering a handler
+// REPLACES the built-in default (Ctrl+C quits): an app that still wants Ctrl+C to
+// quit should call Quit from its handler.
 func (d *Desktop) SetUnhandledKeyFn(fn func(event tui.TypeEvent)) {
 	d.unhandledKeyFn = fn
 }

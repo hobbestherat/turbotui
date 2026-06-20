@@ -7,6 +7,11 @@ type MenuShortcut struct {
 	Key     tui.KeyCode
 	Rune    rune
 	Ctrl    bool
+	// Shift and Alt extend accelerators beyond Ctrl combos so chords like Shift+F1
+	// or Ctrl+Shift+S (and bare function-key accelerators, with Key set to KeyF1…)
+	// can be bound (issue #61).
+	Shift bool
+	Alt   bool
 }
 
 type MenuItem struct {
@@ -66,6 +71,21 @@ func (m *MenuItem) WithShortcut(display string, key tui.KeyCode, r rune, ctrl bo
 		Key:     key,
 		Rune:    r,
 		Ctrl:    ctrl,
+	}
+	return m
+}
+
+// WithShortcutMod is the modifier-aware form of WithShortcut: it binds a shortcut
+// carrying any combination of Ctrl/Shift/Alt, enabling chords such as Shift+F1 or
+// Ctrl+Shift+S and bare function-key accelerators (pass key = tui.KeyF1…, r = 0).
+func (m *MenuItem) WithShortcutMod(display string, key tui.KeyCode, r rune, ctrl bool, shift bool, alt bool) *MenuItem {
+	m.Shortcut = &MenuShortcut{
+		Display: display,
+		Key:     key,
+		Rune:    r,
+		Ctrl:    ctrl,
+		Shift:   shift,
+		Alt:     alt,
 	}
 	return m
 }
@@ -773,6 +793,12 @@ func matchShortcut(event tui.TypeEvent, shortcut *MenuShortcut) bool {
 		}
 	}
 	if shortcut.Ctrl != event.Ctrl {
+		return false
+	}
+	if shortcut.Shift != event.Shift {
+		return false
+	}
+	if shortcut.Alt != event.Alt {
 		return false
 	}
 	return true

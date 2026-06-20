@@ -92,36 +92,49 @@ func TestApplySuccessDoesNotReport(t *testing.T) {
 	}
 }
 
-func TestTryPostNonBlocking(t *testing.T) {
+func TestTryPostNeverBlocks(t *testing.T) {
 	app := NewWithSize(10, 10, &bytes.Buffer{})
 	noop := func() {}
 
-	// Fill the 64-deep queue without ever blocking (TryPost never blocks).
-	for i := 0; i < 64; i++ {
+	// The mailbox is unbounded, so far more than the old 64-deep limit can be
+	// enqueued without ever blocking, and TryPost always succeeds.
+	for i := 0; i < 200; i++ {
 		if !app.TryPost(noop) {
-			t.Fatalf("TryPost #%d returned false before the queue was full", i)
+			t.Fatalf("TryPost #%d returned false; the mailbox should be unbounded", i)
 		}
-	}
-	// The queue is now full: TryPost must refuse rather than block.
-	if app.TryPost(noop) {
-		t.Fatal("TryPost returned true on a full queue; expected it to refuse")
-	}
-	// Drain one slot and the next TryPost should succeed again.
-	<-app.postChannel
-	if !app.TryPost(noop) {
-		t.Fatal("TryPost returned false after draining a slot")
 	}
 }
 
-func TestPostEnqueuesFn(t *testing.T) {
+func TestPostDeliversInOrder(t *testing.T) {
 	app := NewWithSize(10, 10, &bytes.Buffer{})
-	ran := false
-	app.Post(func() { ran = true })
+	var order []int
+	for i := 0; i < 5; i++ {
+		i := i
+		app.Post(func() { order = append(order, i) })
+	}
+	// Simulate the event loop draining the mailbox.
+	app.drainPosts()
+	if len(order) != 5 {
+		t.Fatalf("expected 5 posted fns to run, got %d", len(order))
+	}
+	for i, v := range order {
+		if v != i {
+			t.Fatalf("posts ran out of order: %v", order)
+		}
+	}
+}
 
-	// Simulate the event loop draining the queue.
-	fn := <-app.postChannel
-	fn()
-	if !ran {
-		t.Fatal("posted fn did not run when drained")
+// TestReentrantPostDoesNotDeadlock covers issue #20: a posted closure that itself
+// calls Post (from the loop goroutine) must not deadlock and its re-posted work
+// must still run within the same drain.
+func TestReentrantPostDoesNotDeadlock(t *testing.T) {
+	app := NewWithSize(10, 10, &bytes.Buffer{})
+	inner := false
+	app.Post(func() {
+		app.Post(func() { inner = true })
+	})
+	app.drainPosts()
+	if !inner {
+		t.Fatal("re-entrant Post did not run; drain stopped early or deadlocked")
 	}
 }
