@@ -573,18 +573,17 @@ func TestAddStyledWideGlyphAdvancesTwoColumns(t *testing.T) {
 	}
 }
 
-// A combining mark in a styled span should fold into its base glyph, matching
-// the plain WriteString path. The input below is the explicitly-decomposed form
-// "e" + U+0301 (combining acute) + "x": one grapheme in one cell, with the mark
-// carried in the base cell's Combining field, so "x" lands at column 1.
+// A combining mark in a styled span must fold into its base glyph, matching the
+// plain WriteString path. The input is the explicitly-decomposed form "e" + U+0301
+// (combining acute) + "x": one grapheme in one cell, with the mark carried in the
+// base cell's Combining field, so "x" lands at column 1.
 //
-// NOTE: this test currently FAILS and documents a real defect in drawStyledRow:
-// it treats zero-width combining marks as 1-column cells (w < 1 -> w = 1) instead
-// of folding them into the preceding base, so the mark renders as a stray glyph
-// and every following character shifts one column right. The plain AddLine path
-// renders the same decomposed string correctly. This corrupts decomposed
-// accented text and emoji sequences (skin-tone modifiers, ZWJ joins) in
-// styled/Markdown lines.
+// (Regression guard: an earlier per-cell SetCell implementation rendered the mark
+// as a stray 1-column glyph and shifted every following char right. The current
+// per-span WriteString path folds it correctly. Residual edge, not asserted here:
+// a mark placed at the START of a span whose base is in the PREVIOUS span is
+// dropped, since each span is a separate WriteString call \u2014 pathological for
+// Markdown, where a mark always shares its base's styled run.)
 func TestAddStyledCombiningMarkFoldsIntoBase(t *testing.T) {
 	decomposed := "e\u0301x" // 'e' + combining acute (U+0301) + 'x'
 	view := NewTextView("", Rect{X: 0, Y: 0, W: 10, H: 2})
@@ -603,6 +602,41 @@ func TestAddStyledCombiningMarkFoldsIntoBase(t *testing.T) {
 	// 'x' must land at column 1 (the combining mark does not consume a column).
 	if got := app.ReadCell(1, 0).Ch; got != 'x' {
 		t.Fatalf("cell(1,0) = %q, want 'x' (combining mark must not consume a column)", got)
+	}
+}
+
+// A styled single-span line must render cell-for-cell identically to the plain
+// AddLine path, even for content mixing a combining mark and a double-width
+// glyph. This locks in the parity the per-span WriteString path is meant to
+// preserve (display width, combining-mark folding, wide-glyph advance) and would
+// catch any future divergence between the two render paths.
+func TestAddStyledSingleSpanMatchesPlainForTrickyContent(t *testing.T) {
+	tricky := "a\u0301\u4e16x" // 'a' + combining acute + wide '\u4e16' (U+4E16) + 'x'
+	mk := func() *TextView {
+		v := NewTextView("", Rect{X: 0, Y: 0, W: 12, H: 2})
+		v.FG = tui.ANSIColor(7)
+		v.BG = tui.ANSIColor(0)
+		return v
+	}
+	plain := mk()
+	plain.AddLine(tricky)
+	papp := drawTextView(plain, 12, 2)
+
+	styled := mk()
+	styled.AddStyled([]StyledSpan{{Text: tricky, FG: tui.ANSIColor(7), HasFG: true}})
+	sapp := drawTextView(styled, 12, 2)
+
+	for x := 0; x < 8; x++ {
+		pc := papp.ReadCell(x, 0)
+		sc := sapp.ReadCell(x, 0)
+		if pc != sc {
+			t.Fatalf("cell(%d,0) diverges: plain Ch=%q Comb=%q | styled Ch=%q Comb=%q",
+				x, pc.Ch, pc.Combining, sc.Ch, sc.Combining)
+		}
+	}
+	// Sanity: the wide glyph advanced two columns (combining mark folded, 'x' at col 3).
+	if got := sapp.ReadCell(3, 0).Ch; got != 'x' {
+		t.Fatalf("cell(3,0) = %q, want 'x' (acute folded + wide glyph advanced 2 cols)", got)
 	}
 }
 
