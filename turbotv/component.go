@@ -51,13 +51,34 @@ type VisualComponent struct {
 	// natural Bounds size.
 	Flex int
 
-	DrawFn      DrawFn
-	LayoutFn    LayoutFn
-	OnTypeFn    TypeHandlerFn
-	OnPasteFn   PasteHandlerFn
-	OnClickFn   ClickHandlerFn
-	OnScrollFn  ScrollHandlerFn
-	OnFocusFn   FocusHandlerFn
+	// DrawFn paints the component's own content; the desktop calls it during a
+	// frame, before the children are drawn. Leave it nil for a container that only
+	// arranges children.
+	DrawFn DrawFn
+	// LayoutFn, when set, runs at the start of each Draw (and on SetBounds) to size
+	// or position this component's children before they paint — the hook for
+	// responsive layout that depends on the current bounds.
+	LayoutFn LayoutFn
+	// OnTypeFn is offered each key event while the component (or a descendant that
+	// did not consume it) is focused. Return true to consume it; return false to
+	// let it bubble to the parent.
+	OnTypeFn TypeHandlerFn
+	// OnPasteFn is offered a bracketed-paste block delivered to the focused
+	// component. Return true to consume it, false to let it bubble.
+	OnPasteFn PasteHandlerFn
+	// OnClickFn is offered a mouse press/release that hit-tested to this component
+	// (or bubbled up from a child). Return true to consume it, false to bubble.
+	OnClickFn ClickHandlerFn
+	// OnScrollFn is offered a scroll-wheel event over this component. Return true
+	// to consume it, false to let it bubble to the parent.
+	OnScrollFn ScrollHandlerFn
+	// OnFocusFn is called when the desktop gives this component focus
+	// (focused=true) or takes it away (focused=false). It is a notification, not a
+	// veto — it has no return value.
+	OnFocusFn FocusHandlerFn
+	// OnHitTestFn, when set, decides whether an absolute (x, y) counts as inside
+	// this component, overriding the default bounds test (e.g. a non-rectangular
+	// click target). The desktop calls it while routing mouse events.
 	OnHitTestFn HitTestFn
 	// CursorFn, when set on a focused component, returns the absolute screen
 	// position of the text cursor so the desktop can place the real terminal

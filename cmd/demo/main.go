@@ -1,3 +1,6 @@
+// Command demo is a small showcase of the low-level tui engine: it draws to the
+// cell grid and reacts to keyboard, mouse and resize events. Run it with
+// `go run ./cmd/demo` and press q to quit.
 package main
 
 import (

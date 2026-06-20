@@ -6,6 +6,13 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
+// Surface is the clipped drawing target handed to a component's DrawFn. It wraps
+// the App's cell buffer together with a clip rectangle, so every write
+// (SetCell, WriteString, Fill, DrawBox, DrawShadow) is confined to the
+// component's area and can never overdraw a sibling. WithClip narrows the clip
+// for a child region; the framework already passes each component a surface
+// clipped to its bounds. A Surface is a small value, cheap to copy and pass by
+// value.
 type Surface struct {
 	app  *tui.App
 	clip Rect

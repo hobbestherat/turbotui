@@ -2,10 +2,19 @@ package tv
 
 import tui "github.com/hobbestherat/turbotui"
 
+// Dialog is a centered, dialog-themed Window for modal layers: a panel that
+// closes on Escape by default and seeds its colours from the active theme's
+// Dialog* palette. It wraps a Window (reachable through the Window field) so all
+// the window machinery — content, buttons, dragging — is available; add it to a
+// modal layer with NewModalLayer. See the dialog helpers (ShowConfirmYesNo, …)
+// for ready-made dialogs.
 type Dialog struct {
 	Window *Window
 }
 
+// NewDialog creates a dialog-themed window at (x, y) with the given size. The
+// returned dialog closes on Escape unless its Window.Component.OnTypeFn is
+// replaced; wire default/cancel buttons with Dialog.SetDefaultCancelButtons.
 func NewDialog(title string, x int, y int, width int, height int) *Dialog {
 	window := NewWindow(title, Rect{X: x, Y: y, W: width, H: height}, tui.LineDouble)
 	window.TitleFG = activeTheme.DialogFG

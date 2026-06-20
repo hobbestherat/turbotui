@@ -1,5 +1,10 @@
 package tv
 
+// Rect is an axis-aligned rectangle in cell coordinates: the top-left corner
+// (X, Y) and a size (W, H). Widget bounds are expressed relative to the parent;
+// VisualComponent.AbsoluteBounds resolves them to screen coordinates. The
+// methods (Inset, Move, Union, Intersect, …) return copies and never mutate the
+// receiver, so a Rect is safe to pass and store by value.
 type Rect struct {
 	X int
 	Y int

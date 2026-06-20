@@ -2,6 +2,11 @@ package tv
 
 import tui "github.com/hobbestherat/turbotui"
 
+// Button is a focusable push button. It activates on Enter/Space or a click,
+// calling OnPress; focus is shown by wrapping the caption in chevrons (►Label◄).
+// A label declared with '&' (e.g. "&Quit") gives the button a mnemonic, and
+// Default/Cancel mark the buttons that a dialog's Enter/Escape trigger when no
+// focused widget consumed the key. Construct one with NewButton.
 type Button struct {
 	Component   *VisualComponent
 	Label       string
@@ -23,6 +28,9 @@ type Button struct {
 	Cancel  bool
 }
 
+// NewButton creates a button with the given label and bounds. onPress (which may
+// be nil) is called when the button is activated by Enter, Space, a click or its
+// mnemonic. The button seeds its colours and shadow from the active theme.
 func NewButton(label string, bounds Rect, onPress func()) *Button {
 	button := &Button{
 		Label:       label,

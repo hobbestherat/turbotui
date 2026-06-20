@@ -1,3 +1,6 @@
+// Command demo is the full widget showcase for the tv toolkit: a desktop with a
+// menu bar, windows, dialogs, text inputs and a drop-down select. Run it with
+// `go run ./turbotv/cmd/demo` and press Ctrl+Q to quit.
 package main
 
 import (
