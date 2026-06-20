@@ -269,14 +269,13 @@ func (d *Desktop) Run(ctx context.Context) error {
 func (d *Desktop) handleClick(event tui.ClickEvent) {
 	// The menubar sits above every layer, so it gets first claim on clicks that
 	// fall on the bar or an open dropdown. A click anywhere else closes the menu.
-	if d.menuBar != nil && (d.menuBar.IsOpen() || d.menuBar.HitTest(event.X, event.Y)) {
-		if event.Down {
-			if d.menuBar.HitTest(event.X, event.Y) {
-				_ = d.menuBar.Component.BubbleClick(event)
-			} else {
-				d.menuBar.CloseMenus()
-			}
-		}
+	// It is gated by menuInScope so that, while a modal dialog is up, clicks on
+	// row 0 behave like any other click outside the modal (the bar is unreachable
+	// by mouse just as it is by keyboard).
+	if d.menuInScope() && (d.menuBar.IsOpen() || d.menuBar.HitTest(event.X, event.Y)) {
+		// Route both press and release to the menubar so leaf items can activate
+		// on release (press-drag-release), letting the bar decide based on coords.
+		_ = d.menuBar.Component.BubbleClick(event)
 		d.Redraw()
 		return
 	}
@@ -330,11 +329,14 @@ func (d *Desktop) handleScroll(event tui.ScrollEvent) {
 }
 
 func (d *Desktop) handleType(event tui.TypeEvent) {
-	// A dropped-down menu captures the keyboard entirely.
+	// A dropped-down menu captures the keyboard for navigation keys. Keys it does
+	// not handle (Ctrl accelerators, function keys) fall through so global
+	// shortcuts still fire while a menu is open.
 	if d.menuBar != nil && d.menuBar.IsOpen() {
-		d.menuBar.HandleKey(event)
-		d.Redraw()
-		return
+		if d.menuBar.HandleKey(event) {
+			d.Redraw()
+			return
+		}
 	}
 	// Ctrl accelerators from the menubar, unless a modal layer blocks it.
 	if d.menuInScope() && d.menuBar.HandleAccelerator(event) {
