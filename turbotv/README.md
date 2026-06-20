@@ -24,7 +24,10 @@ Desktop                       owns the screen, the menu bar and a stack of layer
 
 - A **`Desktop`** wraps a `*tui.App`, composes all layers each frame, routes
   input, and manages focus. Create it with `tv.NewDesktop(app)` and run it with
-  `desktop.Run(ctx)`.
+  `desktop.Run(ctx)`. On a terminal resize it clamps every window back into view
+  and invokes `Desktop.OnResize` and each `Layer.OnResize` hook — use those
+  rather than reaching into `app.OnResize`. The desktop is single-threaded:
+  mutate it on the event loop, or from a background goroutine via `Desktop.Post`.
 - A **`Layer`** is one entry in the z-stack. Helpers: `tv.NewFullscreenLayer`
   (background), `tv.NewWindowLayer` (normal window — menu shortcuts from below
   stay live), `tv.NewModalLayer` (dialog — captures all input while on top).
@@ -83,7 +86,13 @@ func main() {
 | `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers; **Esc** closes it by default |
 
 All input widgets are focusable; `Tab`/`Shift+Tab` and arrow keys move focus
-within the top layer. State is read and written with explicit methods
+within the top layer. `Tab` follows reading order (top-to-bottom, then
+left-to-right) regardless of the order widgets were added; set
+`VisualComponent.TabIndex` to override it. Arrow keys pick the nearest widget
+that actually lies in the pressed direction. A modal layer
+(`tv.NewModalLayer`) captures all input while on top — clicks outside its
+bounds never fall through to lower windows, and a modal `Layer.OnClickOutside`
+hook fires instead. State is read and written with explicit methods
 (`GetText()`/`SetText()`, `Value()`/`SetSelected()`) rather than reflection or
 data binding.
 

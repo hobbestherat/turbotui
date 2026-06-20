@@ -32,6 +32,12 @@ type VisualComponent struct {
 	Focusable   bool
 	HasFocus    bool
 	DrawOutside bool
+	// TabIndex orders keyboard focus traversal (Tab / Shift+Tab). Components are
+	// visited in ascending TabIndex; ties fall back to on-screen reading order
+	// (top-to-bottom, then left-to-right) rather than tree/declaration order, so a
+	// form laid out by absolute coordinates tabs the way it reads (issue #50). The
+	// default 0 leaves every widget in pure reading order.
+	TabIndex int
 	// Flex is the grow weight used by Box containers when distributing leftover
 	// space along their packing axis. Zero (the default) means the child keeps its
 	// natural Bounds size.

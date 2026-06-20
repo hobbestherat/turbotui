@@ -887,6 +887,13 @@ func (a *App) dispatchEvent(event any) {
 	}
 }
 
+// Resize changes the logical terminal size and runs the registered resize
+// handlers, exactly as a real terminal SIGWINCH would. It lets embedded/headless
+// callers (and tests) drive reflow without a tty.
+func (a *App) Resize(width int, height int) {
+	a.resize(width, height)
+}
+
 func (a *App) handleTerminalResize() {
 	if a.termOut == nil {
 		return

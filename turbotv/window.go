@@ -46,16 +46,25 @@ type Window struct {
 	OnMaximize       func(window *Window, maximized bool)
 	desktop          *Desktop
 	layer            *Layer
-	dragging         bool
+	mode             clickMode
 	dragOffsetX      int
 	dragOffsetY      int
-	lastMouseDown    bool
-	resizing         bool
 	minimized        bool
 	maximized        bool
 	restoreBounds    Rect
 	bottomWasVisible bool
 }
+
+// clickMode models what an in-progress title-bar mouse interaction is doing, so
+// the press/drag/release invariants live in one place rather than being threaded
+// through several booleans (issue #58).
+type clickMode int
+
+const (
+	clickNone clickMode = iota
+	clickDrag
+	clickResize
+)
 
 func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 	window := &Window{
@@ -476,8 +485,14 @@ func hitButton(abs Rect, r Rect, shown bool, x int, y int) bool {
 
 func (w *Window) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
 	abs := component.AbsoluteBounds()
-	// Resize drag continuity.
-	if event.Down && w.resizing {
+	// An in-progress drag or resize owns the mouse until release, wherever the
+	// pointer has moved to. The release ends the interaction.
+	switch w.mode {
+	case clickResize:
+		if !event.Down {
+			w.mode = clickNone
+			return true
+		}
 		newW := event.X - abs.X + 1
 		newH := event.Y - abs.Y + 1
 		newW, newH = w.clampResize(newW, newH)
@@ -486,71 +501,52 @@ func (w *Window) handleClick(component *VisualComponent, event tui.ClickEvent) b
 			w.OnResize(w)
 		}
 		return true
-	}
-	if !event.Down && w.resizing {
-		w.resizing = false
-		w.lastMouseDown = false
-		return true
-	}
-	// Move drag continuity.
-	if event.Down && w.dragging {
+	case clickDrag:
+		if !event.Down {
+			w.mode = clickNone
+			return true
+		}
 		nx, ny := w.clampMove(event.X-w.dragOffsetX, event.Y-w.dragOffsetY, component.Bounds.W)
 		component.SetBounds(Rect{X: nx, Y: ny, W: component.Bounds.W, H: component.Bounds.H})
 		return true
 	}
-	if !event.Down && w.dragging {
-		w.lastMouseDown = false
-		w.dragging = false
-		return true
-	}
+	// Idle (clickNone): only presses inside the window's chrome start anything.
 	if !abs.Contains(event.X, event.Y) {
-		w.dragging = false
-		w.resizing = false
 		return false
 	}
+	if !event.Down {
+		// A stray release on the window with no interaction underway: consume it on
+		// the title bar (mirrors the old behaviour) and ignore it elsewhere.
+		return event.Y == abs.Y
+	}
 	// Start resizing from the bottom-right grip.
-	if w.Resizable && !w.minimized && !w.maximized && event.Down && event.X == abs.Right() && event.Y == abs.Bottom() {
-		w.resizing = true
-		w.lastMouseDown = true
+	if w.Resizable && !w.minimized && !w.maximized && event.X == abs.Right() && event.Y == abs.Bottom() {
+		w.mode = clickResize
 		return true
 	}
 	buttons := w.titleButtons(abs)
 	// Minimize button.
-	if event.Down && hitButton(abs, buttons.minRect, buttons.hasMin, event.X, event.Y) {
+	if hitButton(abs, buttons.minRect, buttons.hasMin, event.X, event.Y) {
 		w.ToggleMinimize()
-		w.dragging = false
 		return true
 	}
 	// Maximize button.
-	if event.Down && hitButton(abs, buttons.maxRect, buttons.hasMax, event.X, event.Y) {
+	if hitButton(abs, buttons.maxRect, buttons.hasMax, event.X, event.Y) {
 		w.ToggleMaximize()
-		w.dragging = false
 		return true
 	}
 	// Close button.
-	if event.Down && hitButton(abs, buttons.closeRect, buttons.hasClose, event.X, event.Y) {
+	if hitButton(abs, buttons.closeRect, buttons.hasClose, event.X, event.Y) {
 		if w.OnClose != nil {
 			w.OnClose(w)
 		}
-		w.dragging = false
 		return true
 	}
-	if event.Y != abs.Y {
-		if !event.Down {
-			w.dragging = false
-		}
-		return false
-	}
-	if event.Down && !w.lastMouseDown {
-		w.dragging = true
+	// A press on the title bar (and nowhere else) begins a move drag.
+	if event.Y == abs.Y {
+		w.mode = clickDrag
 		w.dragOffsetX = event.X - abs.X
 		w.dragOffsetY = event.Y - abs.Y
-		w.lastMouseDown = true
-		return true
-	}
-	if !event.Down {
-		w.lastMouseDown = false
-		w.dragging = false
 		return true
 	}
 	return false
