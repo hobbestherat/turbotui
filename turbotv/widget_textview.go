@@ -183,6 +183,16 @@ func (t *TextView) ScrollToBottom() {
 	t.follow = true
 }
 
+// ScrollToTop anchors the view at the first line and stops following the bottom,
+// so the content opens at the top and stays there until the user scrolls (or
+// ScrollToBottom re-enables following as content is added). Use it for views
+// that should open at the top — info/help dialogs — rather than pinned to the
+// bottom like chat or logs.
+func (t *TextView) ScrollToTop() {
+	t.follow = false
+	t.scrollY = 0
+}
+
 // touch is called whenever content changes; while following, the view stays
 // pinned to the bottom so streamed text remains visible. The huge sentinel is
 // clamped to the real maximum during draw. It also bumps layoutVersion so the
