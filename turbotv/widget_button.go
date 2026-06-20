@@ -13,6 +13,13 @@ type Button struct {
 	ShadowColor tui.Color
 	Pressed     bool
 	OnPress     func()
+	// Default marks the button that Enter activates when the keystroke reaches the
+	// dialog root (i.e. no focused widget consumed it); Cancel marks the one Escape
+	// activates. They are wired by Dialog.SetDefaultCancelButtons. A focused button
+	// still handles its own Enter/Space, so these only matter when focus is on a
+	// non-button widget (or for Escape, which buttons never consume themselves).
+	Default bool
+	Cancel  bool
 }
 
 func NewButton(label string, bounds Rect, onPress func()) *Button {

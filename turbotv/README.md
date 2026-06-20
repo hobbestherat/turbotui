@@ -210,12 +210,26 @@ tv.ShowConfirmYesNo(desktop, "Confirm", "Apply values?", func(yes bool) {
 })
 ```
 
-`ShowConfirmYesNo` pushes a modal layer and returns it. For custom dialogs build
-a `tv.NewDialog(...)`, add widgets, and push it with `tv.NewModalLayer(...)`.
+`ShowConfirmYesNo` is sized to its message: the width fits the longer of the
+wrapped message and the button row, the height fits the wrapped line count, and
+both are capped to the screen (so the footer never crowds, overlaps, or clips at
+any size). The buttons carry `&Yes`/`&No` mnemonics with **Enter**→Yes (default)
+and **Esc**→No (cancel). It pushes a modal layer and returns it.
+
+For custom dialogs build a `tv.NewDialog(...)`, add widgets, and push it with
+`tv.NewModalLayer(...)`. Lay a footer out with `tv.NewButtonRow(rowY, interiorW,
+align, gap, buttons...)`, which sizes each button to its label, separates them by
+`gap`, and start/center/end-aligns the group within the content width — no magic
+offsets. Mark a button `Default`/`Cancel` and call
+`dialog.SetDefaultCancelButtons(buttons...)` so **Enter** activates the default
+and **Esc** the cancel whenever the focused widget does not consume the key.
+
 A dialog (or window) added through a layer gets a back-reference to its desktop,
 so `dialog.Window.Close()` removes the layer and fires `OnClose` in one call, and
 a generic dialog closes on **Esc** by default (replace `Root().OnTypeFn` to change
-that).
+that). The title-bar **[■]** close button self-dismisses (removes the window's
+layer) when no `OnClose` is set; wire `OnClose` to take full control of teardown
+(e.g. a confirmation step).
 
 ### Window placement constraints
 

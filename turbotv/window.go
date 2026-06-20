@@ -121,15 +121,29 @@ func (w *Window) AddBottom(child Widget) {
 
 // Close removes the window's layer from its desktop (when it was added via a
 // layer) and then fires OnClose. Apps that wire the window through
-// NewWindowLayer/NewModalLayer + Desktop.AddLayer get one-line teardown; the
-// title-bar close button still routes through OnClose only, so apps that want a
-// confirmation step keep full control there.
+// NewWindowLayer/NewModalLayer + Desktop.AddLayer get one-line teardown.
 func (w *Window) Close() {
 	if w.desktop != nil && w.layer != nil {
 		w.desktop.RemoveLayer(w.layer)
 	}
 	if w.OnClose != nil {
 		w.OnClose(w)
+	}
+}
+
+// closeButtonPressed implements the title-bar [■] action. When the app installed
+// an OnClose handler it owns the decision (so a confirmation step can veto the
+// close, or run its own teardown), and the click routes through OnClose only.
+// Otherwise the window self-dismisses by removing its own layer, so a [■] on a
+// dialog built with NewDialog (which inherits a live close button) is never a
+// silent no-op (issue #49).
+func (w *Window) closeButtonPressed() {
+	if w.OnClose != nil {
+		w.OnClose(w)
+		return
+	}
+	if w.desktop != nil && w.layer != nil {
+		w.desktop.RemoveLayer(w.layer)
 	}
 }
 
@@ -537,9 +551,7 @@ func (w *Window) handleClick(component *VisualComponent, event tui.ClickEvent) b
 	}
 	// Close button.
 	if hitButton(abs, buttons.closeRect, buttons.hasClose, event.X, event.Y) {
-		if w.OnClose != nil {
-			w.OnClose(w)
-		}
+		w.closeButtonPressed()
 		return true
 	}
 	// A press on the title bar (and nowhere else) begins a move drag.
