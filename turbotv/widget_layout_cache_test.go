@@ -207,9 +207,10 @@ func TestMultiLineDrawScrollsCursorIntoView(t *testing.T) {
 // visualPosToCursorFromRows path).
 func TestMultiLineClickThenDragUsesSingleLayout(t *testing.T) {
 	m := NewMultiLineInput("abcdef", Rect{X: 0, Y: 0, W: 4, H: 2})
-	// Press at col 1 of wrapped row 1 (the "ef" continuation).
+	// W=4 reserves a scrollbar column, so text wraps at width 3 ("abc"/"def").
+	// Press at col 1 of wrapped row 1 (the "def" continuation).
 	m.Component.OnClickFn(m.Component, tui.ClickEvent{X: 1, Y: 1, Down: true})
-	if m.CursorY != 0 || m.CursorX != 5 {
-		t.Fatalf("after click expected cursor (0,5), got (%d,%d)", m.CursorY, m.CursorX)
+	if m.CursorY != 0 || m.CursorX != 4 {
+		t.Fatalf("after click expected cursor (0,4), got (%d,%d)", m.CursorY, m.CursorX)
 	}
 }

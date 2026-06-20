@@ -96,6 +96,12 @@ For action-style forms, inputs can submit directly:
   - `MultiLineSubmitOnCtrlEnter`: Ctrl+Enter = submit, Enter = newline
 - When `OnSubmit` is not set on `MultiLineInput`, Enter and Shift+Enter both insert new lines.
 
+`MultiLineInput` reserves its rightmost column for a vertical scrollbar (shared
+with `TextView`/tree/dropdown) that appears when the wrapped content overflows the
+box; its arrows, track and thumb are all clickable and the thumb is draggable. By
+default long logical lines wrap at the character level (good for code); set
+`MultiLineInput.WordWrap = true` to wrap on whitespace so words stay intact.
+
 ### Clipboard paste
 
 Bracketed paste (terminal mode `?2004`) is enabled automatically. Pasted text
