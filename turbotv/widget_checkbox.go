@@ -51,15 +51,20 @@ func (c *Checkbox) toggle() bool {
 }
 func (c *Checkbox) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := inputColors(component.HasFocus, c.FG, c.BG, c.FocusFG, c.FocusBG)
+	fg, bg := focusColors(component.HasFocus, c.FG, c.BG, c.FocusFG, c.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
-	surface.Fill(Rect{X: abs.X, Y: abs.Y, W: abs.W, H: 1}, tui.Cell{Ch: ' ', FG: fg, BG: bg})
+	// Fill the whole bounds (not just the first row) so the focus highlight and
+	// the click hit area (handleClick toggles anywhere in abs) match what is drawn
+	// when a caller sizes the checkbox taller than one row.
+	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 	box := "[ ] "
 	if c.Checked {
 		box = "[x] "
 	}
 	surface.WriteString(abs.X, abs.Y, box, tui.Cell{FG: fg, BG: bg, Bold: true})
-	drawMnemonic(surface, abs.X+4, abs.Y, c.Label, style, component.mnemonicActive, activeTheme.MnemonicFG)
+	// Truncate the label to the space after the "[x] " marker so a long caption
+	// shows an ellipsis instead of being silently cut by the surface clip.
+	drawMnemonicClipped(surface, abs.X+4, abs.Y, c.Label, abs.W-4, style, component.mnemonicActive, activeTheme.MnemonicFG)
 }
 func (c *Checkbox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	if event.Key == tui.KeyEnter || (event.Key == tui.KeyRune && event.Rune == ' ') {

@@ -100,3 +100,22 @@ func TestShowConfirmYesNoButtonsDoNotOverlap(t *testing.T) {
 		t.Fatalf("expected disjoint button bounds, got a=%+v b=%+v", a, b)
 	}
 }
+
+// TestShowConfirmYesNoLongMessageWraps verifies the dialog's message label wraps a
+// long message across its rows instead of clipping it to a single line (the root
+// of the "text is not wrapping" popup bug). The 'Q' lives past the label's first
+// row, so it is visible only when the message wraps.
+func TestShowConfirmYesNoLongMessageWraps(t *testing.T) {
+	app := tui.NewWithSize(80, 25, &bytes.Buffer{})
+	desktop := NewDesktop(app)
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 80, H: 25})))
+
+	// 50 A's fill the label's first row exactly; " Q" wraps onto the second row.
+	message := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Q"
+	ShowConfirmYesNo(desktop, "Confirm", message, nil)
+	desktop.Redraw()
+
+	if !cellRendered(app, 'Q') {
+		t.Fatal("expected the wrapped second line of the message to render a 'Q'")
+	}
+}

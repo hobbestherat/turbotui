@@ -6,13 +6,49 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
-// inputColors picks the foreground/background pair for an input widget based on
-// whether it currently has focus.
-func inputColors(focused bool, fg tui.Color, bg tui.Color, focusFG tui.Color, focusBG tui.Color) (tui.Color, tui.Color) {
+// focusColors picks the foreground/background pair for a widget based on whether
+// it currently has focus. It is shared by every input (TextBox/Select/Checkbox/
+// MultiLineInput) and by non-input widgets that still swap colours on focus
+// (Button), so the focus-colour pattern is spelled one way everywhere.
+func focusColors(focused bool, fg tui.Color, bg tui.Color, focusFG tui.Color, focusBG tui.Color) (tui.Color, tui.Color) {
 	if focused {
 		return focusFG, focusBG
 	}
 	return fg, bg
+}
+
+// drawMnemonicClipped writes label (with the '&' mnemonic marker removed) at
+// (x, y), truncating it to maxWidth terminal columns with a trailing "…" when it
+// overflows, and underlines the mnemonic hot character in hotFG when highlight is
+// true and it survived truncation. It returns the display width actually drawn.
+//
+// Unlike drawMnemonic (which never truncates), this is for widgets whose label
+// must stay inside a fixed width — Button captions and Checkbox labels — so a long
+// label shows an ellipsis instead of bleeding into a neighbour or being silently
+// clipped by the surface.
+func drawMnemonicClipped(surface Surface, x int, y int, label string, maxWidth int, style tui.Cell, highlight bool, hotFG tui.Color) int {
+	clean, hot := parseMnemonic(label)
+	if maxWidth <= 0 {
+		return 0
+	}
+	text := clean
+	cleanRunes := []rune(clean)
+	prefixRunes := len(cleanRunes) // how many clean runes are shown before any ellipsis
+	if tui.StringWidth(clean) > maxWidth {
+		text = Truncate(clean, maxWidth, "…")
+		// Truncate appended a single "…" rune, so the shown clean runes are the
+		// truncated text minus that one rune.
+		prefixRunes = len([]rune(text)) - len([]rune("…"))
+		if prefixRunes < 0 {
+			prefixRunes = 0
+		}
+	}
+	surface.WriteString(x, y, text, style)
+	if highlight && hot >= 0 && hot < prefixRunes {
+		col := x + tui.StringWidth(string(cleanRunes[:hot]))
+		surface.SetCell(col, y, tui.Cell{Ch: cleanRunes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+	}
+	return tui.StringWidth(text)
 }
 
 // parseMnemonic strips the '&' mnemonic marker from a label and returns the clean

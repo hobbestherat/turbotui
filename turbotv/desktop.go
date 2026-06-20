@@ -393,6 +393,12 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	if isCopyKey(event) && d.copyFocused() {
 		return
 	}
+	// Ctrl+X cuts the focused widget's selection: the widget deletes it and the
+	// desktop puts the removed text on the clipboard. Consumed only when the
+	// widget had something cuttable, so the keystroke otherwise falls through.
+	if isCutKey(event) && d.cutFocused() {
+		return
+	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
 	// visible; a focused descendant of a just-hidden container must not receive
 	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
@@ -435,6 +441,10 @@ func isCopyKey(event tui.TypeEvent) bool {
 	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'c'
 }
 
+func isCutKey(event tui.TypeEvent) bool {
+	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'x'
+}
+
 // copyFocused copies the focused component's CopyFn text to the clipboard,
 // returning true when something was copied.
 func (d *Desktop) copyFocused() bool {
@@ -442,6 +452,21 @@ func (d *Desktop) copyFocused() bool {
 		return false
 	}
 	text, ok := d.focused.CopyFn(d.focused)
+	if !ok {
+		return false
+	}
+	d.app.CopyToClipboard(text)
+	return true
+}
+
+// cutFocused asks the focused component to cut (delete + return) its selection
+// and puts the removed text on the clipboard, returning true when something was
+// cut. It mirrors copyFocused so copy and cut stay symmetric.
+func (d *Desktop) cutFocused() bool {
+	if d.focused == nil || d.focused.CutFn == nil {
+		return false
+	}
+	text, ok := d.focused.CutFn(d.focused)
 	if !ok {
 		return false
 	}

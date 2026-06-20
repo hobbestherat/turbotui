@@ -55,7 +55,13 @@ type VisualComponent struct {
 	// CopyFn, when set, returns the text the component would copy to the clipboard
 	// (a selection, or all of its content) and whether there is anything to copy.
 	// The desktop calls it on Ctrl+C / Ctrl+Shift+C for the focused component.
-	CopyFn        func(component *VisualComponent) (string, bool)
+	CopyFn func(component *VisualComponent) (string, bool)
+	// CutFn, when set, is the clipboard "cut" hook: it removes the selection (or
+	// whatever the component considers cuttable) from its own content and returns
+	// that text plus whether anything was cut. The desktop calls it on Ctrl+X for
+	// the focused component and copies the returned text to the clipboard. When
+	// nothing is cuttable it returns ok=false so the keystroke can fall through.
+	CutFn         func(component *VisualComponent) (string, bool)
 	Background    tui.Cell
 	UseBackground bool
 

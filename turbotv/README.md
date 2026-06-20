@@ -71,9 +71,9 @@ func main() {
 | Widget               | Constructor                                            | Notes |
 |----------------------|--------------------------------------------------------|-------|
 | `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`/`Close()`, draggable, close/`Minimizable`/`Maximizable`/`Resizable` buttons; drag/resize/maximize clamped to the desktop work area (or `ConstrainTo`) |
-| `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate |
-| `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget |
-| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter |
+| `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate; long captions are ellipsised and never bleed past the button |
+| `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget; word-wraps across its rows (`Wrap`, on by default) instead of clipping |
+| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter; Ctrl+A/arrow/Backspace editing (see below) |
 | `MultiLineInput`     | `NewMultiLineInput(text, bounds)`                      | Multi-line editor; `GetText`; optional `OnSubmit` + `SubmitMode` |
 | `TextView`           | `NewTextView(text, bounds)`                            | Read-only, mouse-wheel scrollable; `SetText` |
 | `Select`             | `NewSelect(desktop, options, bounds)`                  | Drop-down combo; `Value`, `GetSelected`, `SetSelected`, `OnChange` |
@@ -110,7 +110,7 @@ and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
 `MultiLineInput` keeps them. To handle paste in a custom widget, set
 `Component.OnPasteFn` (or call `app.OnPaste(...)` at the engine level).
 
-### Selection and copy
+### Selection, copy and cut
 
 `TextBox` and `MultiLineInput` support text selection:
 
@@ -119,13 +119,19 @@ and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
 - Typing, **Backspace** or **Delete** replaces/removes the selection.
 - **Ctrl+C** (and **Ctrl+Shift+C** where the terminal forwards it) copies the
   selection to the system clipboard.
+- **Ctrl+X** cuts the selection (deletes it and copies it to the clipboard), in
+  `TextBox`. With nothing selected it does nothing and the keystroke falls through.
+
+`TextBox` also has the usual editing shortcuts: **Ctrl+A** selects all,
+**Ctrl+Left/Right** jump a word (hold **Shift** to extend the selection), and
+**Ctrl+Backspace** / **Ctrl+Delete** delete a word.
 
 A focused `TextView` has no caret, so **Ctrl+C copies its entire content**
 (`TextView.AllText()`), including the children of folded entries — handy for
 grabbing a whole chat/log pane.
 
-Ctrl+C only copies when there is something to copy; otherwise it is left for the
-app (e.g. a quit confirmation) via `Desktop.SetUnhandledKeyFn`.
+Ctrl+C/Ctrl+X only act when there is something to copy/cut; otherwise they are
+left for the app (e.g. a quit confirmation) via `Desktop.SetUnhandledKeyFn`.
 
 Copy is written with **OSC 52** (reaches the clipboard through most terminals
 and over SSH) plus a best-effort native fallback (`pbcopy` / `wl-copy` /

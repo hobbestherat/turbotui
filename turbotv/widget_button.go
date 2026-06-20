@@ -54,27 +54,44 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	if b.Pressed {
 		face = Rect{X: abs.X + 1, Y: abs.Y + 1, W: abs.W, H: abs.H}
 	}
+	// The shadow sits outside the button bounds, so it must draw through the
+	// parent's clip (the component opts out via DrawOutside). The face and label
+	// do NOT: draw them through a face-bounds-clipped surface so a caption longer
+	// than the button can never bleed into neighbouring widgets.
 	if b.Shadow && !b.Pressed {
 		surface.DrawShadow(abs, b.ShadowColor)
 	}
-	fg, bg := b.FG, b.BG
-	if component.HasFocus {
-		fg, bg = b.FocusFG, b.FocusBG
-	}
+	fg, bg := focusColors(component.HasFocus, b.FG, b.BG, b.FocusFG, b.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg, Bold: true}
-	surface.Fill(face, style)
+	faceSurface := surface.WithClip(face)
+	faceSurface.Fill(face, style)
+
 	clean, _ := parseMnemonic(b.Label)
 	// Focused buttons are wrapped in chevrons so keyboard focus is obvious.
 	left, right := "[ ", " ]"
 	if component.HasFocus {
 		left, right = "►", "◄"
 	}
-	display := left + clean + right
-	start := face.X + (face.W-len([]rune(display)))/2
+	leftW := tui.StringWidth(left)
+	rightW := tui.StringWidth(right)
+	avail := face.W - leftW - rightW
+	if avail < 0 {
+		avail = 0
+	}
+	// Caption width after truncation, for centring. When the label fits it keeps
+	// its full width; otherwise it is ellipsised down to the available width.
+	captionW := tui.StringWidth(clean)
+	if captionW > avail {
+		captionW = avail
+	}
+	displayW := leftW + captionW + rightW
+	start := face.X + (face.W-displayW)/2
 	if start < face.X {
 		start = face.X
 	}
-	drawMnemonic(surface, start, face.Y, left+b.Label+right, style, component.mnemonicActive, activeTheme.MnemonicFG)
+	faceSurface.WriteString(start, face.Y, left, style)
+	drawMnemonicClipped(faceSurface, start+leftW, face.Y, b.Label, avail, style, component.mnemonicActive, activeTheme.MnemonicFG)
+	faceSurface.WriteString(start+leftW+captionW, face.Y, right, style)
 }
 
 func (b *Button) press() bool {

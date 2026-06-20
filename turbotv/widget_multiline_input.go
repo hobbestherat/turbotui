@@ -118,7 +118,7 @@ func (m *MultiLineInput) Clear() {
 
 func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := inputColors(component.HasFocus, m.FG, m.BG, m.FocusFG, m.FocusBG)
+	fg, bg := focusColors(component.HasFocus, m.FG, m.BG, m.FocusFG, m.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 	// Reserve the right-hand column for the scrollbar, mirroring TextView, so the

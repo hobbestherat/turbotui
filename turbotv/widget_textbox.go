@@ -1,6 +1,10 @@
 package tv
 
-import tui "github.com/hobbestherat/turbotui"
+import (
+	"unicode"
+
+	tui "github.com/hobbestherat/turbotui"
+)
 
 type TextBox struct {
 	Component *VisualComponent
@@ -35,6 +39,7 @@ func NewTextBox(text string, bounds Rect) *TextBox {
 	box.Component.OnClickFn = box.handleClick
 	box.Component.CursorFn = box.cursorPos
 	box.Component.CopyFn = box.copySelection
+	box.Component.CutFn = box.cutSelection
 	return box
 }
 
@@ -54,7 +59,7 @@ func (t *TextBox) GetText() string {
 
 func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := inputColors(component.HasFocus, t.FG, t.BG, t.FocusFG, t.FocusBG)
+	fg, bg := focusColors(component.HasFocus, t.FG, t.BG, t.FocusFG, t.FocusBG)
 	textStyle := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 	visibleStart := t.ScrollX
@@ -95,6 +100,12 @@ func (t *TextBox) cursorPos(component *VisualComponent) (int, int, bool) {
 }
 
 func (t *TextBox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
+	// Ctrl-modified editing shortcuts: select-all, word-wise jump and word-wise
+	// delete. Anything else with Ctrl falls through to the regular handling below
+	// (so Ctrl+Enter still submits and other Ctrl runes are rejected as before).
+	if event.Ctrl && t.handleCtrlShortcut(event) {
+		return true
+	}
 	switch event.Key {
 	case tui.KeyEnter:
 		if t.OnSubmit == nil {
@@ -138,6 +149,94 @@ func (t *TextBox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	t.deleteSelection()
 	t.insertRune(event.Rune)
 	return true
+}
+
+// handleCtrlShortcut applies a Ctrl-modified editing shortcut and reports whether
+// it recognised the event. It never claims keys it does not handle, so unhandled
+// Ctrl combos keep their original behaviour (submit on Ctrl+Enter, rejection of
+// other Ctrl runes).
+func (t *TextBox) handleCtrlShortcut(event tui.TypeEvent) bool {
+	switch event.Key {
+	case tui.KeyRune:
+		if unicode.ToLower(event.Rune) == 'a' {
+			// Select all: anchor at the start, caret at the end.
+			t.selAnchor = 0
+			t.Cursor = len(t.Text)
+			return true
+		}
+		return false
+	case tui.KeyLeft:
+		t.moveCursor(wordBoundaryLeft(t.Text, t.Cursor), event.Shift)
+		return true
+	case tui.KeyRight:
+		t.moveCursor(wordBoundaryRight(t.Text, t.Cursor), event.Shift)
+		return true
+	case tui.KeyBackspace:
+		if t.deleteSelection() {
+			return true
+		}
+		start := wordBoundaryLeft(t.Text, t.Cursor)
+		if start < t.Cursor {
+			t.Text = append(t.Text[:start], t.Text[t.Cursor:]...)
+			t.Cursor = start
+		}
+		return true
+	case tui.KeyDelete:
+		if t.deleteSelection() {
+			return true
+		}
+		end := wordBoundaryRight(t.Text, t.Cursor)
+		if end > t.Cursor {
+			t.Text = append(t.Text[:t.Cursor], t.Text[end:]...)
+		}
+		return true
+	}
+	return false
+}
+
+// charClass buckets a non-space rune for word-boundary motion: word characters
+// (letters, digits, underscore) form one class, every other non-space rune
+// (punctuation, symbols) another, so the caret jumps over a run of the same kind.
+func charClass(r rune) int {
+	if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+		return 0
+	}
+	return 1
+}
+
+// wordBoundaryLeft returns the start of the word at or before pos: it skips the
+// run of spaces to the left, then the run of same-class characters, landing at a
+// word boundary (or 0).
+func wordBoundaryLeft(runes []rune, pos int) int {
+	for pos > 0 && unicode.IsSpace(runes[pos-1]) {
+		pos--
+	}
+	if pos == 0 {
+		return 0
+	}
+	class := charClass(runes[pos-1])
+	for pos > 0 && !unicode.IsSpace(runes[pos-1]) && charClass(runes[pos-1]) == class {
+		pos--
+	}
+	return pos
+}
+
+// wordBoundaryRight returns the start of the word at or after pos: it skips the
+// run of spaces to the right, then the run of same-class characters, landing at
+// the next word boundary (or len(runes)).
+func wordBoundaryRight(runes []rune, pos int) int {
+	n := len(runes)
+	for pos < n && unicode.IsSpace(runes[pos]) {
+		pos++
+	}
+	if pos == n {
+		return n
+	}
+	class := charClass(runes[pos])
+	for pos < n && !unicode.IsSpace(runes[pos]) && charClass(runes[pos]) == class {
+		pos++
+	}
+	return pos
 }
 
 // moveCursor moves the caret to pos. When extend is true the selection anchor is
@@ -194,6 +293,21 @@ func (t *TextBox) copySelection(_ *VisualComponent) (string, bool) {
 	}
 	lo, hi := t.selRange()
 	return string(t.Text[lo:hi]), true
+}
+
+// cutSelection is the CutFn: it copies the current selection to the clipboard
+// (via the desktop) and removes it from the text. With no selection it reports
+// nothing to cut so Ctrl+X falls through, mirroring copySelection.
+func (t *TextBox) cutSelection(_ *VisualComponent) (string, bool) {
+	if !t.hasSelection() {
+		return "", false
+	}
+	lo, hi := t.selRange()
+	text := string(t.Text[lo:hi])
+	t.Text = append(t.Text[:lo], t.Text[hi:]...)
+	t.Cursor = lo
+	t.selAnchor = -1
+	return text, true
 }
 
 func (t *TextBox) insertRune(value rune) {
