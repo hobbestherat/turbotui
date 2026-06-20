@@ -140,9 +140,12 @@ window.AddContent(region)
 ```
 
 The list opens on a desktop-owned popup layer, so it is **never clipped** by the
-window that hosts it. Keyboard: `Enter`/`Space` open, `↑`/`↓` move, `Enter`
-pick, `Esc` cancel. Mouse: click to open, click an item to pick, click outside to
-dismiss.
+window that hosts it. It widens to fit the longest option and flips above the
+control when there is no room below. Keyboard: `Enter`/`Space` open, `↑`/`↓`
+move, `Home`/`End` jump to the ends, `PgUp`/`PgDn` page, typing a letter jumps
+(type-ahead) to the next option beginning with it, `Enter` pick, `Esc` cancel.
+Mouse: click to open, click an item to pick, click or drag the scrollbar to
+scroll, wheel to scroll, click outside to dismiss.
 
 ## Menus, mnemonics and accelerators
 
