@@ -45,8 +45,8 @@ import (
 )
 
 func main() {
-    app, err := tui.New()
-    if err != nil {
+    app := tui.New()
+    if err := app.Validate(); err != nil {
         panic(err)
     }
 
@@ -95,6 +95,11 @@ func main() {
 - **Clipboard.** `app.CopyToClipboard(text)` writes the system clipboard via
   OSC 52 (works over SSH and in most terminals) plus a best-effort native
   fallback (`pbcopy`/`wl-copy`/`xclip`/`xsel`) for terminals that ignore OSC 52.
+  The native fallback runs only when local — over SSH it is skipped so it can't
+  write the *remote* host's clipboard. Use `app.SetClipboardBackend(...)` to
+  pick `ClipboardOSC52AndNative` (default), `ClipboardOSC52Only`, or
+  `ClipboardNativeOnly`. Call `CopyToClipboard` on the event-loop goroutine; from
+  a background goroutine schedule it with `app.Post`.
 - **Shutdown.** `app.Close()` tears the alternate screen down cleanly.
   `app.CloseWithMessage(msg)` does the same and then prints `msg` (multi-line and
   ANSI-coloured via `tui.Styled`) to the normal buffer — handy for printing run
@@ -102,7 +107,10 @@ func main() {
 
 ### Construction helpers
 
-- `tui.New()` — auto-sizes to the current terminal (the usual choice).
+- `tui.New()` — auto-sizes to the current terminal (the usual choice). It never
+  returns an error: an unreadable size falls back to 80×25.
+- `app.Validate()` — optional; returns an error if stdin/stdout are not a
+  terminal, so non-tty startup is detectable immediately rather than at `Run`.
 - `tui.NewWithIO(in, out, w, h)` — explicit files/size (e.g. a PTY).
 - `tui.NewWithSize(w, h, out)` — buffer-backed, no real terminal; ideal for tests
   that inspect rendered output via `app.ReadCell(x, y)`.

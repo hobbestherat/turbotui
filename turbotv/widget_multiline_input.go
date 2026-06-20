@@ -29,6 +29,10 @@ type MultiLineInput struct {
 	BG        tui.Color
 	FocusFG   tui.Color
 	FocusBG   tui.Color
+	// WordWrap, when true, breaks long logical lines on whitespace so words are
+	// kept intact instead of being split mid-word at the right edge. The default
+	// (false) keeps the original character-level wrapping, which suits code.
+	WordWrap bool
 	// OnSubmit, when set, fires according to SubmitMode.
 	OnSubmit   func()
 	SubmitMode MultiLineSubmitMode
@@ -36,6 +40,9 @@ type MultiLineInput struct {
 	selAnchorX int
 	selAnchorY int // -1 when there is no selection
 	selecting  bool
+	// draggingThumb is true while the user holds the scrollbar thumb, so motion
+	// events keep mapping to the scroll position even off the 1-column track.
+	draggingThumb bool
 	// pressLine/pressCursor remember where the mouse went down so a selection is
 	// only anchored once the pointer actually drags away from that point. A plain
 	// click therefore leaves no selection (which previously caused the first
@@ -50,6 +57,14 @@ type wrappedLineRow struct {
 	runes []rune
 }
 
+// runeSpan is a half-open [start, end) range of rune indices into one logical
+// line. Spans for a line are contiguous and cover it with no gaps, so a span's
+// start is always a valid offset for selection/cursor math regardless of mode.
+type runeSpan struct {
+	start int
+	end   int
+}
+
 func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 	lines := strings.Split(text, "\n")
 	if len(lines) == 0 {
@@ -59,10 +74,10 @@ func NewMultiLineInput(text string, bounds Rect) *MultiLineInput {
 		Lines:      lines,
 		CursorX:    len([]rune(lines[len(lines)-1])),
 		CursorY:    len(lines) - 1,
-		FG:         DefaultTheme.InputFG,
-		BG:         DefaultTheme.InputBG,
-		FocusFG:    DefaultTheme.InputFocusFG,
-		FocusBG:    DefaultTheme.InputFocusBG,
+		FG:         activeTheme.InputFG,
+		BG:         activeTheme.InputBG,
+		FocusFG:    activeTheme.InputFocusFG,
+		FocusBG:    activeTheme.InputFocusBG,
 		SubmitMode: MultiLineSubmitOnEnter,
 		selAnchorY: -1,
 	}
@@ -103,43 +118,90 @@ func (m *MultiLineInput) Clear() {
 
 func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := inputColors(component.HasFocus, m.FG, m.BG, m.FocusFG, m.FocusBG)
+	fg, bg := focusColors(component.Focused(), m.FG, m.BG, m.FocusFG, m.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
-	rows := m.wrappedRows(abs.W)
-	m.ensureScroll(abs.H, abs.W)
+	// Reserve the right-hand column for the scrollbar, mirroring TextView, so the
+	// text layout stays stable whether or not the bar is currently shown.
+	textWidth := m.contentWidth(abs.W)
+	// Wrap once and derive the caret row from the same layout, so the whole draw
+	// is a single O(rows) pass. Previously this re-derived the layout up to four
+	// times (twice through a redundant focused-only ensureScroll).
+	rows := m.wrappedRows(textWidth)
+	cursorRow, _ := m.cursorRowCol(rows, textWidth)
+	m.ensureScrolledTo(abs.H, cursorRow, len(rows))
 	for row := 0; row < abs.H; row++ {
 		rowIndex := m.ScrollY + row
 		if rowIndex < 0 || rowIndex >= len(rows) {
 			continue
 		}
 		wrapped := rows[rowIndex]
-		for col := 0; col < abs.W && col < len(wrapped.runes); col++ {
+		for col := 0; col < textWidth && col < len(wrapped.runes); col++ {
 			cell := style
 			cell.Ch = wrapped.runes[col]
 			if m.isSelected(wrapped.line, wrapped.start+col) {
-				cell.FG = DefaultTheme.SelectionFG
-				cell.BG = DefaultTheme.SelectionBG
+				cell.FG = activeTheme.SelectionFG
+				cell.BG = activeTheme.SelectionBG
 			}
 			surface.SetCell(abs.X+col, abs.Y+row, cell)
 		}
+		// Fill the blank tail of a selected, spanned line so a block selection runs
+		// to the right edge instead of stopping at each line's last character.
+		for col := len(wrapped.runes); col < textWidth; col++ {
+			if !m.isSelected(wrapped.line, wrapped.start+col) {
+				continue
+			}
+			surface.SetCell(abs.X+col, abs.Y+row, tui.Cell{
+				Ch: ' ',
+				FG: activeTheme.SelectionFG,
+				BG: activeTheme.SelectionBG,
+			})
+		}
 	}
-	if component.HasFocus {
-		m.ensureScroll(abs.H, abs.W)
+	// Only show the scrollbar when there is overflow; the reserved column is
+	// otherwise left blank.
+	if abs.W > 1 && len(rows) > abs.H {
+		m.drawScrollbar(surface, abs, component.Focused(), len(rows), bg)
 	}
+}
+
+// contentWidth is the width available for text: one column narrower than the
+// widget so the scrollbar has a home, collapsing to the full width only when the
+// widget is too thin (<=1) to host a bar.
+func (m *MultiLineInput) contentWidth(width int) int {
+	if width > 1 {
+		return width - 1
+	}
+	return width
+}
+
+// drawScrollbar paints the right-hand track and thumb via the shared scrollbar
+// helper, so the input matches TextView/tree/dropdown. Focused inputs use the
+// accent colour; unfocused ones are dimmed.
+func (m *MultiLineInput) drawScrollbar(surface Surface, abs Rect, focused bool, total int, bg tui.Color) {
+	color := tui.ANSIColor(8)
+	if focused {
+		color = m.FocusFG
+	}
+	track := Rect{X: abs.Right(), Y: abs.Y, W: 1, H: abs.H}
+	drawVScrollbar(surface, track, total, abs.H, m.ScrollY, color, bg, focused)
 }
 
 // cursorPos reports the absolute caret position for the hardware cursor.
 func (m *MultiLineInput) cursorPos(component *VisualComponent) (int, int, bool) {
 	abs := component.AbsoluteBounds()
-	m.ensureScroll(abs.H, abs.W)
-	cursorVisualY, cursorVisualX := m.cursorVisualPos(abs.W)
+	textWidth := m.contentWidth(abs.W)
+	// Compute the caret row once and feed it (plus the total) into the scroll
+	// clamp, instead of ensureScroll re-deriving cursorVisualPos and then this
+	// method calling it a second time.
+	cursorVisualY, cursorVisualX := m.cursorVisualPos(textWidth)
+	m.ensureScrolledTo(abs.H, cursorVisualY, m.totalVisualRows(textWidth))
 	cursorY := cursorVisualY - m.ScrollY
 	if cursorY < 0 || cursorY >= abs.H {
 		return 0, 0, false
 	}
-	if cursorVisualX >= abs.W {
-		cursorVisualX = abs.W - 1
+	if cursorVisualX >= textWidth {
+		cursorVisualX = textWidth - 1
 	}
 	if cursorVisualX < 0 {
 		return 0, 0, false
@@ -179,11 +241,11 @@ func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) boo
 		return true
 	case tui.KeyUp:
 		m.extendOrClear(event.Shift)
-		m.moveUp(m.Component.Bounds.W)
+		m.moveUp(m.contentWidth(m.Component.Bounds.W))
 		return true
 	case tui.KeyDown:
 		m.extendOrClear(event.Shift)
-		m.moveDown(m.Component.Bounds.W)
+		m.moveDown(m.contentWidth(m.Component.Bounds.W))
 		return true
 	case tui.KeyHome:
 		m.extendOrClear(event.Shift)
@@ -340,7 +402,7 @@ func (m *MultiLineInput) handleScroll(_ *VisualComponent, event tui.ScrollEvent)
 	if m.ScrollY < 0 {
 		m.ScrollY = 0
 	}
-	max := m.totalVisualRows(m.Component.Bounds.W) - 1
+	max := m.totalVisualRows(m.contentWidth(m.Component.Bounds.W)) - 1
 	if max < 0 {
 		max = 0
 	}
@@ -437,30 +499,35 @@ func (m *MultiLineInput) moveRight() {
 }
 
 func (m *MultiLineInput) moveUp(width int) {
-	cursorRow, cursorCol := m.cursorVisualPos(width)
+	rows := m.wrappedRows(width)
+	cursorRow, cursorCol := m.cursorRowCol(rows, width)
 	if cursorRow <= 0 {
 		return
 	}
-	line, column := m.visualPosToCursor(width, cursorRow-1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow-1, cursorCol)
 	m.CursorY = line
 	m.CursorX = column
 }
 
 func (m *MultiLineInput) moveDown(width int) {
-	cursorRow, cursorCol := m.cursorVisualPos(width)
-	if cursorRow >= m.totalVisualRows(width)-1 {
+	rows := m.wrappedRows(width)
+	cursorRow, cursorCol := m.cursorRowCol(rows, width)
+	if cursorRow >= len(rows)-1 {
 		return
 	}
-	line, column := m.visualPosToCursor(width, cursorRow+1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow+1, cursorCol)
 	m.CursorY = line
 	m.CursorX = column
 }
 
-func (m *MultiLineInput) ensureScroll(height int, width int) {
+// ensureScrolledTo clamps ScrollY so the caret (at cursorRow of total visual
+// rows) stays inside the viewport. It is the allocation-free core of the old
+// ensureScroll: callers pass the already-computed caret row and row count so the
+// layout is not re-derived inside.
+func (m *MultiLineInput) ensureScrolledTo(height int, cursorRow int, total int) {
 	if height < 1 {
 		height = 1
 	}
-	cursorRow, _ := m.cursorVisualPos(width)
 	if cursorRow < m.ScrollY {
 		m.ScrollY = cursorRow
 	}
@@ -470,7 +537,7 @@ func (m *MultiLineInput) ensureScroll(height int, width int) {
 	if m.ScrollY < 0 {
 		m.ScrollY = 0
 	}
-	max := m.totalVisualRows(width) - height
+	max := total - height
 	if max < 0 {
 		max = 0
 	}
@@ -486,19 +553,11 @@ func (m *MultiLineInput) wrappedRows(width int) []wrappedLineRow {
 	rows := make([]wrappedLineRow, 0, len(m.Lines))
 	for lineIndex, lineText := range m.Lines {
 		runes := []rune(lineText)
-		if len(runes) == 0 {
-			rows = append(rows, wrappedLineRow{line: lineIndex, start: 0, runes: []rune{}})
-			continue
-		}
-		for start := 0; start < len(runes); start += width {
-			end := start + width
-			if end > len(runes) {
-				end = len(runes)
-			}
+		for _, span := range m.lineSpans(runes, width) {
 			rows = append(rows, wrappedLineRow{
 				line:  lineIndex,
-				start: start,
-				runes: runes[start:end],
+				start: span.start,
+				runes: runes[span.start:span.end],
 			})
 		}
 	}
@@ -506,6 +565,67 @@ func (m *MultiLineInput) wrappedRows(width int) []wrappedLineRow {
 		rows = append(rows, wrappedLineRow{line: 0, start: 0, runes: []rune{}})
 	}
 	return rows
+}
+
+// lineSpans splits one logical line into the contiguous [start, end) rune spans
+// that become its visual rows at the given width, honouring WordWrap. Both modes
+// preserve every rune (the spans tile the line with no gaps), so a span's start
+// remains a valid selection/cursor offset. An empty line yields one empty span.
+func (m *MultiLineInput) lineSpans(runes []rune, width int) []runeSpan {
+	if width < 1 {
+		width = 1
+	}
+	if len(runes) == 0 {
+		return []runeSpan{{start: 0, end: 0}}
+	}
+	if m.WordWrap {
+		return wordWrapSpans(runes, width)
+	}
+	spans := make([]runeSpan, 0, (len(runes)+width-1)/width)
+	for start := 0; start < len(runes); start += width {
+		end := start + width
+		if end > len(runes) {
+			end = len(runes)
+		}
+		spans = append(spans, runeSpan{start: start, end: end})
+	}
+	return spans
+}
+
+// wordWrapSpans breaks runes into contiguous spans no wider than width, breaking
+// after whitespace so words stay intact and hard-splitting any single word that
+// is itself wider than width. The break whitespace stays at the end of its span,
+// keeping the spans contiguous (and thus offset-preserving) rather than dropping
+// runes the way a Fields-based wrapper would.
+func wordWrapSpans(runes []rune, width int) []runeSpan {
+	if width < 1 {
+		width = 1
+	}
+	n := len(runes)
+	if n == 0 {
+		return []runeSpan{{start: 0, end: 0}}
+	}
+	var spans []runeSpan
+	start := 0
+	for start < n {
+		if n-start <= width {
+			spans = append(spans, runeSpan{start: start, end: n})
+			break
+		}
+		end := start + width
+		// Prefer breaking just after the last whitespace within the row so the
+		// following word is not split; fall back to a hard cut when there is none.
+		breakAt := end
+		for i := end - 1; i > start; i-- {
+			if runes[i] == ' ' || runes[i] == '\t' {
+				breakAt = i + 1
+				break
+			}
+		}
+		spans = append(spans, runeSpan{start: start, end: breakAt})
+		start = breakAt
+	}
+	return spans
 }
 
 func (m *MultiLineInput) shouldSubmit(event tui.TypeEvent) bool {
@@ -538,6 +658,9 @@ func (m *MultiLineInput) rowsForLine(line string, width int) int {
 	if width < 1 {
 		width = 1
 	}
+	if m.WordWrap {
+		return len(m.lineSpans([]rune(line), width))
+	}
 	length := len([]rune(line))
 	if length == 0 {
 		return 1
@@ -547,6 +670,21 @@ func (m *MultiLineInput) rowsForLine(line string, width int) int {
 		rows = 1
 	}
 	return rows
+}
+
+// caretSpanOffsetCol locates the caret within its logical line as a (visual-row
+// offset, column) pair using the actual wrap spans. It is the word-wrap analogue
+// of the character arithmetic in cursorVisualPos/cursorRowCol; both callers route
+// through it when WordWrap is on so they stay in agreement.
+func (m *MultiLineInput) caretSpanOffsetCol(lineIndex, cursorX, width int) (int, int) {
+	spans := m.lineSpans([]rune(m.Lines[lineIndex]), width)
+	for i, span := range spans {
+		if cursorX < span.end {
+			return i, cursorX - span.start
+		}
+	}
+	last := len(spans) - 1
+	return last, cursorX - spans[last].start
 }
 
 func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
@@ -573,6 +711,10 @@ func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
 	for index := 0; index < m.CursorY; index++ {
 		row += m.rowsForLine(m.Lines[index], width)
 	}
+	if m.WordWrap {
+		offset, col := m.caretSpanOffsetCol(m.CursorY, m.CursorX, width)
+		return row + offset, col
+	}
 	offset := m.CursorX / width
 	col := m.CursorX % width
 	lineRows := m.rowsForLine(m.Lines[m.CursorY], width)
@@ -586,8 +728,58 @@ func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
 	return row, col
 }
 
-func (m *MultiLineInput) visualPosToCursor(width int, row int, col int) (int, int) {
-	rows := m.wrappedRows(width)
+// cursorRowCol derives the (visual row, column) of the caret from an already
+// wrapped layout, clamping CursorY/CursorX into bounds as a side effect (the
+// same clamping cursorVisualPos performs). Use it on paths that have already
+// called wrappedRows, to avoid re-deriving the layout.
+func (m *MultiLineInput) cursorRowCol(rows []wrappedLineRow, width int) (int, int) {
+	if width < 1 {
+		width = 1
+	}
+	if len(m.Lines) == 0 {
+		return 0, 0
+	}
+	if m.CursorY < 0 {
+		m.CursorY = 0
+	}
+	if m.CursorY >= len(m.Lines) {
+		m.CursorY = len(m.Lines) - 1
+	}
+	lineRunes := []rune(m.Lines[m.CursorY])
+	if m.CursorX < 0 {
+		m.CursorX = 0
+	}
+	if m.CursorX > len(lineRunes) {
+		m.CursorX = len(lineRunes)
+	}
+	// Count wrapped rows belonging to lines strictly above the cursor line.
+	row := 0
+	for _, w := range rows {
+		if w.line < m.CursorY {
+			row++
+		}
+	}
+	if m.WordWrap {
+		offset, col := m.caretSpanOffsetCol(m.CursorY, m.CursorX, width)
+		return row + offset, col
+	}
+	offset := m.CursorX / width
+	col := m.CursorX % width
+	lineRows := m.rowsForLine(m.Lines[m.CursorY], width)
+	if offset >= lineRows {
+		offset = lineRows - 1
+		if col >= width {
+			col = width - 1
+		}
+	}
+	row += offset
+	return row, col
+}
+
+// visualPosToCursorFromRows maps a (visual row, column) back to a (line, cursor)
+// using an already-wrapped layout. It is the allocation-free form of the old
+// visualPosToCursor, which re-wrapped the whole buffer on every call.
+func (m *MultiLineInput) visualPosToCursorFromRows(rows []wrappedLineRow, row int, col int) (int, int) {
 	if len(rows) == 0 {
 		return 0, 0
 	}
@@ -612,10 +804,33 @@ func (m *MultiLineInput) visualPosToCursor(width int, row int, col int) (int, in
 
 func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
 	abs := component.AbsoluteBounds()
+	textWidth := m.contentWidth(component.Bounds.W)
 	if !event.Down {
 		m.selecting = false
+		m.draggingThumb = false
 		return true
 	}
+	// A scrollbar interaction takes precedence over caret placement so dragging the
+	// thumb (or clicking the track/arrows) never moves the cursor or starts a text
+	// selection. Mirrors TextView, using the shared scrollbarOffsetForY mapping.
+	track := Rect{X: abs.Right(), Y: abs.Y, W: 1, H: abs.H}
+	total := m.totalVisualRows(textWidth)
+	if m.draggingThumb {
+		if offset, ok := scrollbarOffsetForY(track, total, abs.H, m.ScrollY, event.Y); ok {
+			m.ScrollY = offset
+		}
+		return true
+	}
+	if abs.W > 1 && total > abs.H && event.X == abs.Right() {
+		if offset, ok := scrollbarOffsetForY(track, total, abs.H, m.ScrollY, event.Y); ok {
+			m.ScrollY = offset
+			m.draggingThumb = true
+			return true
+		}
+	}
+	// Wrap once and reuse it for the hit mapping (a drag fires many motion
+	// events; this avoids re-wrapping the whole buffer on each one).
+	rows := m.wrappedRows(textWidth)
 	row := m.ScrollY + (event.Y - abs.Y)
 	col := event.X - abs.X
 	if col < 0 {
@@ -624,7 +839,7 @@ func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.Click
 	if row < 0 {
 		row = 0
 	}
-	line, cursor := m.visualPosToCursor(component.Bounds.W, row, col)
+	line, cursor := m.visualPosToCursorFromRows(rows, row, col)
 	if !m.selecting {
 		if !abs.Contains(event.X, event.Y) {
 			return false

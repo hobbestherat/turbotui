@@ -20,6 +20,7 @@ type Window struct {
 	CloseBG     tui.Color
 	Shadow      bool
 	ShadowColor tui.Color
+	ShadowStyle ShadowStyle
 	OnClose     func(*Window)
 	// Resizable, when true, draws a corner grip and lets the user drag the
 	// bottom-right corner to resize the window (opt-in).
@@ -27,35 +28,59 @@ type Window struct {
 	// Minimizable, when true, adds a [▾]/[▴] button to the title bar that
 	// collapses the window to just its title bar and back (opt-in).
 	Minimizable bool
+	// Maximizable, when true, adds a [▢]/[▣] button to the title bar that expands
+	// the window to fill its constraint area (the desktop work area by default)
+	// and restores it to its previous bounds (opt-in).
+	Maximizable bool
 	MinWidth    int
 	MinHeight   int
+	// ConstrainTo, when non-nil and non-empty, bounds drag, resize and maximize to
+	// this rect (in screen coordinates). When nil, the window falls back to the
+	// owning desktop's work area (see Desktop.WorkArea / Desktop.SetWorkArea), and
+	// is unconstrained only when it has no desktop at all.
+	ConstrainTo *Rect
 	// OnResize fires after the window is resized via the grip; OnMinimize fires
-	// when the minimized state changes (minimized=true when collapsed).
+	// when the minimized state changes (minimized=true when collapsed); OnMaximize
+	// fires when the maximized state changes (maximized=true when expanded).
 	OnResize         func(*Window)
 	OnMinimize       func(window *Window, minimized bool)
-	dragging         bool
+	OnMaximize       func(window *Window, maximized bool)
+	desktop          *Desktop
+	layer            *Layer
+	mode             clickMode
 	dragOffsetX      int
 	dragOffsetY      int
-	lastMouseDown    bool
-	resizing         bool
 	minimized        bool
+	maximized        bool
 	restoreBounds    Rect
 	bottomWasVisible bool
 }
+
+// clickMode models what an in-progress title-bar mouse interaction is doing, so
+// the press/drag/release invariants live in one place rather than being threaded
+// through several booleans (issue #58).
+type clickMode int
+
+const (
+	clickNone clickMode = iota
+	clickDrag
+	clickResize
+)
 
 func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 	window := &Window{
 		Title:       title,
 		Border:      border,
 		ShowClose:   true,
-		TitleFG:     DefaultTheme.WindowTitleFG,
-		TitleBG:     DefaultTheme.WindowTitleBG,
-		BorderFG:    DefaultTheme.WindowBorderFG,
-		BorderBG:    DefaultTheme.WindowBorderBG,
-		CloseFG:     DefaultTheme.CloseButtonFG,
-		CloseBG:     DefaultTheme.CloseButtonBG,
+		TitleFG:     activeTheme.WindowTitleFG,
+		TitleBG:     activeTheme.WindowTitleBG,
+		BorderFG:    activeTheme.WindowBorderFG,
+		BorderBG:    activeTheme.WindowBorderBG,
+		CloseFG:     activeTheme.CloseButtonFG,
+		CloseBG:     activeTheme.CloseButtonBG,
 		Shadow:      true,
-		ShadowColor: DefaultTheme.WindowShadow,
+		ShadowColor: activeTheme.WindowShadow,
+		ShadowStyle: DefaultShadowStyle,
 		MinWidth:    12,
 		MinHeight:   3,
 	}
@@ -64,15 +89,24 @@ func NewWindow(title string, bounds Rect, border tui.LineKind) *Window {
 	window.Component.DrawFn = window.draw
 	window.Component.LayoutFn = window.layout
 	window.Component.OnClickFn = window.handleClick
-	window.Content = NewComponent(Rect{X: 1, Y: 1, W: bounds.W - 2, H: bounds.H - 2})
+	// Content/BottomBar are children of the window, so their bounds are
+	// window-relative: inset the window's size, not its position.
+	inner := Rect{W: bounds.W, H: bounds.H}.Inset(1)
+	window.Content = NewComponent(inner)
 	window.Content.UseBackground = true
-	window.Content.Background = tui.Cell{Ch: ' ', FG: DefaultTheme.WindowFG, BG: DefaultTheme.WindowBG}
-	window.BottomBar = NewComponent(Rect{X: 1, Y: bounds.H - 2, W: bounds.W - 2, H: 1})
+	window.Content.Background = tui.Cell{Ch: ' ', FG: activeTheme.WindowFG, BG: activeTheme.WindowBG}
+	window.BottomBar = NewComponent(Rect{X: inner.X, Y: inner.Bottom(), W: inner.W, H: 1})
 	window.BottomBar.Visible = false
 	window.Component.AddChild(window.Content)
 	window.Component.AddChild(window.BottomBar)
 	return window
 }
+
+// windowRef satisfies the unexported hasWindow interface so that adding a Window
+// (directly or via a Dialog) to a layer wires the window back to its layer and
+// desktop, enabling Close() and bounds constraints.
+func (w *Window) windowRef() *Window { return w }
+
 func (w *Window) Root() *VisualComponent {
 	return w.Component
 }
@@ -87,36 +121,109 @@ func (w *Window) AddBottom(child Widget) {
 	}
 }
 
+// Close removes the window's layer from its desktop (when it was added via a
+// layer) and then fires OnClose. Apps that wire the window through
+// NewWindowLayer/NewModalLayer + Desktop.AddLayer get one-line teardown.
+func (w *Window) Close() {
+	if w.desktop != nil && w.layer != nil {
+		w.desktop.RemoveLayer(w.layer)
+	}
+	if w.OnClose != nil {
+		w.OnClose(w)
+	}
+}
+
+// closeButtonPressed implements the title-bar [■] action. When the app installed
+// an OnClose handler it owns the decision (so a confirmation step can veto the
+// close, or run its own teardown), and the click routes through OnClose only.
+// Otherwise the window self-dismisses by removing its own layer, so a [■] on a
+// dialog built with NewDialog (which inherits a live close button) is never a
+// silent no-op (issue #49).
+func (w *Window) closeButtonPressed() {
+	if w.OnClose != nil {
+		w.OnClose(w)
+		return
+	}
+	if w.desktop != nil && w.layer != nil {
+		w.desktop.RemoveLayer(w.layer)
+	}
+}
+
 // IsMinimized reports whether the window is collapsed to its title bar.
 func (w *Window) IsMinimized() bool { return w.minimized }
 
-// Minimize collapses the window to a single title-bar row.
+// IsMaximized reports whether the window is expanded to its constraint area.
+func (w *Window) IsMaximized() bool { return w.maximized }
+
+// Minimize collapses the window to a single title-bar row. A minimized window is
+// never also maximized; the saved restore bounds keep the pre-collapse size.
 func (w *Window) Minimize() {
 	if w.minimized {
 		return
 	}
+	if !w.maximized {
+		w.restoreBounds = w.Component.Bounds
+	}
+	// Leaving a maximized state to minimize keeps the saved normal bounds.
+	w.maximized = false
 	w.minimized = true
-	w.restoreBounds = w.Component.Bounds
 	w.Content.Visible = false
 	w.bottomWasVisible = w.BottomBar.Visible
 	w.BottomBar.Visible = false
-	w.Component.SetBounds(Rect{X: w.Component.Bounds.X, Y: w.Component.Bounds.Y, W: w.Component.Bounds.W, H: 1})
+	cur := w.Component.Bounds
+	w.Component.SetBounds(Rect{X: cur.X, Y: cur.Y, W: cur.W, H: 1})
+	// The focused child now has a hidden ancestor; move focus out so keystrokes
+	// (and the hardware cursor) do not leak to an invisible widget.
+	if w.desktop != nil {
+		w.desktop.ensureFocusInTopLayer()
+	}
 	if w.OnMinimize != nil {
 		w.OnMinimize(w, true)
 	}
 }
 
-// Restore expands a minimized window back to its previous bounds.
-func (w *Window) Restore() {
-	if !w.minimized {
+// Maximize expands the window to fill its constraint area (the desktop work area
+// by default), remembering the current bounds so Restore can put it back.
+func (w *Window) Maximize() {
+	if w.maximized {
 		return
 	}
-	w.minimized = false
-	w.Content.Visible = true
-	w.BottomBar.Visible = w.bottomWasVisible
-	w.Component.SetBounds(w.restoreBounds)
-	if w.OnMinimize != nil {
-		w.OnMinimize(w, false)
+	if w.minimized {
+		// Un-collapse the chrome but keep the pre-minimize restore bounds.
+		w.minimized = false
+		w.Content.Visible = true
+		w.BottomBar.Visible = w.bottomWasVisible
+	} else {
+		w.restoreBounds = w.Component.Bounds
+	}
+	w.maximized = true
+	w.Component.SetBounds(w.maximizeArea())
+	if w.OnMaximize != nil {
+		w.OnMaximize(w, true)
+	}
+}
+
+// Restore returns a maximized window to its pre-maximize bounds, or expands a
+// minimized window back to its title-bar's current position with the saved size.
+func (w *Window) Restore() {
+	switch {
+	case w.maximized:
+		w.maximized = false
+		w.Component.SetBounds(w.restoreBounds)
+		if w.OnMaximize != nil {
+			w.OnMaximize(w, false)
+		}
+	case w.minimized:
+		w.minimized = false
+		w.Content.Visible = true
+		w.BottomBar.Visible = w.bottomWasVisible
+		// Honour any drag performed while minimized: restore the saved size at the
+		// bar's current position rather than snapping back to the pre-minimize spot.
+		cur := w.Component.Bounds
+		w.Component.SetBounds(Rect{X: cur.X, Y: cur.Y, W: w.restoreBounds.W, H: w.restoreBounds.H})
+		if w.OnMinimize != nil {
+			w.OnMinimize(w, false)
+		}
 	}
 }
 
@@ -128,6 +235,99 @@ func (w *Window) ToggleMinimize() {
 		w.Minimize()
 	}
 }
+
+// ToggleMaximize flips the maximized state.
+func (w *Window) ToggleMaximize() {
+	if w.maximized {
+		w.Restore()
+	} else {
+		w.Maximize()
+	}
+}
+
+// constraintRect returns the rect (in screen coordinates) that drag, resize and
+// maximize are clamped to, and whether such a constraint exists.
+func (w *Window) constraintRect() (Rect, bool) {
+	if w.ConstrainTo != nil && !w.ConstrainTo.Empty() {
+		return *w.ConstrainTo, true
+	}
+	if w.desktop != nil {
+		return w.desktop.WorkArea(), true
+	}
+	return Rect{}, false
+}
+
+// maximizeArea is the rect a maximized window fills. With no constraint (a
+// window not attached to a desktop) it keeps its current bounds.
+func (w *Window) maximizeArea() Rect {
+	if area, ok := w.constraintRect(); ok {
+		return area
+	}
+	return w.Component.Bounds
+}
+
+// clampMove clamps a proposed top-left (x, y) so the title bar stays grabbable
+// inside the constraint area: the top and left edges may not leave the area
+// (so the title never slides under a top reserve such as the menu bar, nor off
+// the left), while the bottom and right may overflow as long as at least a small
+// handle of width `keep` remains on screen. This matches modern window managers
+// and keeps the existing "drag partly past the bottom edge" behaviour.
+func (w *Window) clampMove(x int, y int, width int) (int, int) {
+	area, ok := w.constraintRect()
+	if !ok {
+		return x, y
+	}
+	keep := w.MinWidth
+	if keep > width {
+		keep = width
+	}
+	if keep < 1 {
+		keep = 1
+	}
+	minX := area.X
+	maxX := area.Right() - keep + 1
+	if maxX < minX {
+		maxX = minX
+	}
+	if x < minX {
+		x = minX
+	} else if x > maxX {
+		x = maxX
+	}
+	minY := area.Y
+	maxY := area.Bottom()
+	if maxY < minY {
+		maxY = minY
+	}
+	if y < minY {
+		y = minY
+	} else if y > maxY {
+		y = maxY
+	}
+	return x, y
+}
+
+// clampResize clamps a proposed (width, height) so the window stays within the
+// constraint area's right/bottom edges and never shrinks below the minimum.
+func (w *Window) clampResize(newW int, newH int) (int, int) {
+	if area, ok := w.constraintRect(); ok {
+		b := w.Component.Bounds
+		if maxW := area.Right() - b.X + 1; newW > maxW {
+			newW = maxW
+		}
+		if maxH := area.Bottom() - b.Y + 1; newH > maxH {
+			newH = maxH
+		}
+	}
+	if newW < w.MinWidth {
+		newW = w.MinWidth
+	}
+	if newH < w.MinHeight {
+		newH = w.MinHeight
+	}
+	return newW, newH
+}
+
 func (w *Window) layout(component *VisualComponent) {
 	if w.minimized {
 		return
@@ -135,12 +335,13 @@ func (w *Window) layout(component *VisualComponent) {
 	if component.Bounds.W < 2 || component.Bounds.H < 2 {
 		return
 	}
-	contentHeight := component.Bounds.H - 2
+	inner := Rect{W: component.Bounds.W, H: component.Bounds.H}.Inset(1)
+	contentHeight := inner.H
 	if w.BottomBar.Visible && contentHeight > 1 {
 		contentHeight--
-		w.BottomBar.SetBounds(Rect{X: 1, Y: component.Bounds.H - 2, W: component.Bounds.W - 2, H: 1})
+		w.BottomBar.SetBounds(Rect{X: inner.X, Y: inner.Bottom(), W: inner.W, H: 1})
 	}
-	w.Content.SetBounds(Rect{X: 1, Y: 1, W: component.Bounds.W - 2, H: contentHeight})
+	w.Content.SetBounds(Rect{X: inner.X, Y: inner.Y, W: inner.W, H: contentHeight})
 }
 func (w *Window) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
@@ -149,66 +350,98 @@ func (w *Window) draw(component *VisualComponent, surface Surface) {
 		return
 	}
 	if w.Shadow {
-		surface.DrawShadow(abs, w.ShadowColor)
+		surface.DrawShadow(abs, w.ShadowColor, w.ShadowStyle)
 	}
 	surface.DrawBox(abs, w.Border, w.BorderFG, w.BorderBG)
+	buttons := w.titleButtons(abs)
 	title := strings.TrimSpace(w.Title)
-	if title != "" && abs.W > 8 {
-		w.drawTitle(surface, abs)
+	if title != "" && abs.W > 4 {
+		w.drawTitle(surface, abs, buttons)
 	}
-	if w.Minimizable && abs.W > 12 {
-		w.drawMinimize(surface, abs)
+	if buttons.hasMin {
+		w.drawMinimize(surface, abs, buttons)
 	}
-	if w.ShowClose && abs.W > 8 {
-		w.drawClose(surface, abs)
+	if buttons.hasMax {
+		w.drawMaximize(surface, abs, buttons)
 	}
-	if w.Resizable {
+	if buttons.hasClose {
+		w.drawClose(surface, abs, buttons)
+	}
+	if w.Resizable && !w.maximized {
 		surface.SetCell(abs.Right(), abs.Bottom(), tui.Cell{Ch: '◢', FG: w.BorderFG, BG: w.BorderBG, Bold: true})
 	}
 }
 func (w *Window) drawMinimizedBar(surface Surface, rect Rect) {
 	surface.Fill(Rect{X: rect.X, Y: rect.Y, W: rect.W, H: 1}, tui.Cell{Ch: ' ', FG: w.TitleFG, BG: w.TitleBG})
+	buttons := w.titleButtons(rect)
 	title := strings.TrimSpace(w.Title)
-	maxLen := rect.W - 8
-	if maxLen > 0 && title != "" {
-		if len([]rune(title)) > maxLen {
-			title = string([]rune(title)[:maxLen])
+	if title != "" {
+		areaRight := rect.Right() - 1
+		if buttons.leftX >= 0 {
+			areaRight = buttons.leftX - 2
 		}
-		surface.WriteString(rect.X+1, rect.Y, title, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
+		maxLen := areaRight - (rect.X + 1) + 1
+		if maxLen > 0 {
+			if runes := []rune(title); len(runes) > maxLen {
+				title = string(runes[:maxLen])
+			}
+			surface.WriteString(rect.X+1, rect.Y, title, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
+		}
 	}
-	if w.Minimizable {
-		w.drawMinimize(surface, rect)
+	if buttons.hasMin {
+		w.drawMinimize(surface, rect, buttons)
 	}
-	if w.ShowClose {
-		w.drawClose(surface, rect)
+	if buttons.hasMax {
+		w.drawMaximize(surface, rect, buttons)
+	}
+	if buttons.hasClose {
+		w.drawClose(surface, rect, buttons)
 	}
 }
-func (w *Window) drawTitle(surface Surface, rect Rect) {
-	title := w.Title
-	maxLen := rect.W - 8
+func (w *Window) drawTitle(surface Surface, rect Rect, buttons titleButtons) {
+	areaLeft := rect.X + 1
+	areaRight := rect.Right() - 1
+	if buttons.leftX >= 0 {
+		// Stop one column short of the leftmost button.
+		areaRight = buttons.leftX - 2
+	}
+	areaW := areaRight - areaLeft + 1
+	// Reserve the two spaces that frame the title text.
+	maxLen := areaW - 2
 	if maxLen < 1 {
 		return
 	}
-	if len([]rune(title)) > maxLen {
-		titleRunes := []rune(title)
-		title = string(titleRunes[:maxLen])
+	title := w.Title
+	if runes := []rune(title); len(runes) > maxLen {
+		title = string(runes[:maxLen])
 	}
 	text := " " + title + " "
-	start := rect.X + (rect.W-len([]rune(text)))/2
-	if start < rect.X+1 {
-		start = rect.X + 1
+	start := areaLeft + (areaW-len([]rune(text)))/2
+	if start < areaLeft {
+		start = areaLeft
 	}
 	surface.WriteString(start, rect.Y, text, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
 }
-func (w *Window) drawClose(surface Surface, rect Rect) {
-	closeRect := closeButtonRect(rect)
-	if closeRect.X <= rect.X+1 {
+func (w *Window) drawClose(surface Surface, rect Rect, buttons titleButtons) {
+	r := buttons.closeRect
+	if r.X <= rect.X+1 {
 		return
 	}
-	surface.WriteString(closeRect.X, closeRect.Y, "[■]", tui.Cell{FG: w.CloseFG, BG: w.CloseBG, Bold: true})
+	surface.WriteString(r.X, r.Y, "[■]", tui.Cell{FG: w.CloseFG, BG: w.CloseBG, Bold: true})
 }
-func (w *Window) drawMinimize(surface Surface, rect Rect) {
-	r := w.minimizeButtonRect(rect)
+func (w *Window) drawMaximize(surface Surface, rect Rect, buttons titleButtons) {
+	r := buttons.maxRect
+	if r.X <= rect.X+1 {
+		return
+	}
+	glyph := "[▢]"
+	if w.maximized {
+		glyph = "[▣]"
+	}
+	surface.WriteString(r.X, r.Y, glyph, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
+}
+func (w *Window) drawMinimize(surface Surface, rect Rect, buttons titleButtons) {
+	r := buttons.minRect
 	if r.X <= rect.X+1 {
 		return
 	}
@@ -219,103 +452,115 @@ func (w *Window) drawMinimize(surface Surface, rect Rect) {
 	surface.WriteString(r.X, r.Y, glyph, tui.Cell{FG: w.TitleFG, BG: w.TitleBG, Bold: true})
 }
 
-// closeButtonRect is the 3-cell "[■]" hit/draw region in the window title bar.
-func closeButtonRect(abs Rect) Rect {
-	return Rect{X: abs.Right() - 5, Y: abs.Y, W: 3, H: 1}
+// titleButtons holds the absolute hit/draw rects for the title-bar buttons that
+// are currently shown. They are packed right-to-left in the order close,
+// maximize, minimize, each occupying three cells with a one-cell gap. leftX is
+// the X of the leftmost shown button (or -1 when no button is shown) so the
+// title can reserve exactly the room the buttons need.
+type titleButtons struct {
+	closeRect Rect
+	maxRect   Rect
+	minRect   Rect
+	hasClose  bool
+	hasMax    bool
+	hasMin    bool
+	leftX     int
 }
 
-// minimizeButtonRect is the 3-cell minimize button, placed left of the close
-// button when both are shown.
-func (w *Window) minimizeButtonRect(abs Rect) Rect {
-	x := abs.Right() - 5
-	if w.ShowClose {
-		x = abs.Right() - 9
+func (w *Window) titleButtons(abs Rect) titleButtons {
+	buttons := titleButtons{leftX: -1}
+	slot := 0
+	next := func() Rect {
+		r := Rect{X: abs.Right() - 5 - 4*slot, Y: abs.Y, W: 3, H: 1}
+		slot++
+		return r
 	}
-	return Rect{X: x, Y: abs.Y, W: 3, H: 1}
+	if w.ShowClose {
+		buttons.closeRect = next()
+		buttons.hasClose = true
+	}
+	if w.Maximizable {
+		buttons.maxRect = next()
+		buttons.hasMax = true
+	}
+	if w.Minimizable {
+		buttons.minRect = next()
+		buttons.hasMin = true
+	}
+	if slot > 0 {
+		buttons.leftX = abs.Right() - 5 - 4*(slot-1)
+	}
+	return buttons
 }
+
+// hitButton reports whether (x, y) falls on the given button rect when shown and
+// not crowded off the left edge by the border/title.
+func hitButton(abs Rect, r Rect, shown bool, x int, y int) bool {
+	return shown && r.X > abs.X+1 && y == r.Y && x >= r.X && x <= r.Right()
+}
+
 func (w *Window) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
 	abs := component.AbsoluteBounds()
-	// Resize drag continuity.
-	if event.Down && w.resizing {
+	// An in-progress drag or resize owns the mouse until release, wherever the
+	// pointer has moved to. The release ends the interaction.
+	switch w.mode {
+	case clickResize:
+		if !event.Down {
+			w.mode = clickNone
+			return true
+		}
 		newW := event.X - abs.X + 1
 		newH := event.Y - abs.Y + 1
-		if newW < w.MinWidth {
-			newW = w.MinWidth
-		}
-		if newH < w.MinHeight {
-			newH = w.MinHeight
-		}
+		newW, newH = w.clampResize(newW, newH)
 		w.Component.SetBounds(Rect{X: w.Component.Bounds.X, Y: w.Component.Bounds.Y, W: newW, H: newH})
 		if w.OnResize != nil {
 			w.OnResize(w)
 		}
 		return true
-	}
-	if !event.Down && w.resizing {
-		w.resizing = false
-		w.lastMouseDown = false
-		return true
-	}
-	// Move drag continuity.
-	if event.Down && w.dragging {
-		component.SetBounds(Rect{
-			X: event.X - w.dragOffsetX,
-			Y: event.Y - w.dragOffsetY,
-			W: component.Bounds.W,
-			H: component.Bounds.H,
-		})
-		return true
-	}
-	if !event.Down && w.dragging {
-		w.lastMouseDown = false
-		w.dragging = false
-		return true
-	}
-	if !abs.Contains(event.X, event.Y) {
-		w.dragging = false
-		w.resizing = false
-		return false
-	}
-	// Start resizing from the bottom-right grip.
-	if w.Resizable && !w.minimized && event.Down && event.X == abs.Right() && event.Y == abs.Bottom() {
-		w.resizing = true
-		w.lastMouseDown = true
-		return true
-	}
-	// Minimize button.
-	if w.Minimizable && event.Down && event.Y == abs.Y {
-		r := w.minimizeButtonRect(abs)
-		if r.X > abs.X+1 && event.X >= r.X && event.X <= r.Right() {
-			w.ToggleMinimize()
-			w.dragging = false
+	case clickDrag:
+		if !event.Down {
+			w.mode = clickNone
 			return true
 		}
-	}
-	// Close button.
-	closeRect := closeButtonRect(abs)
-	if event.Down && w.ShowClose && event.Y == abs.Y && event.X >= closeRect.X && event.X <= closeRect.Right() {
-		if w.OnClose != nil {
-			w.OnClose(w)
-		}
-		w.dragging = false
+		nx, ny := w.clampMove(event.X-w.dragOffsetX, event.Y-w.dragOffsetY, component.Bounds.W)
+		component.SetBounds(Rect{X: nx, Y: ny, W: component.Bounds.W, H: component.Bounds.H})
 		return true
 	}
-	if event.Y != abs.Y {
-		if !event.Down {
-			w.dragging = false
-		}
+	// Idle (clickNone): only presses inside the window's chrome start anything.
+	if !abs.Contains(event.X, event.Y) {
 		return false
 	}
-	if event.Down && !w.lastMouseDown {
-		w.dragging = true
-		w.dragOffsetX = event.X - abs.X
-		w.dragOffsetY = event.Y - abs.Y
-		w.lastMouseDown = true
+	if !event.Down {
+		// A stray release on the window with no interaction underway: consume it on
+		// the title bar (mirrors the old behaviour) and ignore it elsewhere.
+		return event.Y == abs.Y
+	}
+	// Start resizing from the bottom-right grip.
+	if w.Resizable && !w.minimized && !w.maximized && event.X == abs.Right() && event.Y == abs.Bottom() {
+		w.mode = clickResize
 		return true
 	}
-	if !event.Down {
-		w.lastMouseDown = false
-		w.dragging = false
+	buttons := w.titleButtons(abs)
+	// Minimize button.
+	if hitButton(abs, buttons.minRect, buttons.hasMin, event.X, event.Y) {
+		w.ToggleMinimize()
+		return true
+	}
+	// Maximize button.
+	if hitButton(abs, buttons.maxRect, buttons.hasMax, event.X, event.Y) {
+		w.ToggleMaximize()
+		return true
+	}
+	// Close button.
+	if hitButton(abs, buttons.closeRect, buttons.hasClose, event.X, event.Y) {
+		w.closeButtonPressed()
+		return true
+	}
+	// A press on the title bar (and nowhere else) begins a move drag.
+	if event.Y == abs.Y {
+		w.mode = clickDrag
+		w.dragOffsetX = event.X - abs.X
+		w.dragOffsetY = event.Y - abs.Y
 		return true
 	}
 	return false

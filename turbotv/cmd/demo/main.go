@@ -1,3 +1,6 @@
+// Command demo is the full widget showcase for the tv toolkit: a desktop with a
+// menu bar, windows, dialogs, text inputs and a drop-down select. Run it with
+// `go run ./turbotv/cmd/demo` and press Ctrl+Q to quit.
 package main
 
 import (
@@ -15,8 +18,8 @@ import (
 
 func main() {
 	startTime := time.Now()
-	app, err := tui.New()
-	if err != nil {
+	app := tui.New()
+	if err := app.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize TUI: %v\n", err)
 		os.Exit(1)
 	}
@@ -192,22 +195,22 @@ func buildTreeWindow(desktop *tv.Desktop) {
 }
 
 func focusName(a *tv.TextBox, b *tv.TextBox, m *tv.MultiLineInput, v *tv.TextView, button *tv.Button, region *tv.Select) string {
-	if a.Component.HasFocus {
+	if a.Component.Focused() {
 		return "name"
 	}
-	if b.Component.HasFocus {
+	if b.Component.Focused() {
 		return "city"
 	}
-	if m.Component.HasFocus {
+	if m.Component.Focused() {
 		return "notes"
 	}
-	if v.Component.HasFocus {
+	if v.Component.Focused() {
 		return "textview"
 	}
-	if button.Component.HasFocus {
+	if button.Component.Focused() {
 		return "confirm"
 	}
-	if region.Component.HasFocus {
+	if region.Component.Focused() {
 		return "region"
 	}
 	return "-"

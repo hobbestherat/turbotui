@@ -33,11 +33,13 @@ func TestMultiLineInputUpDownUseWrappedRows(t *testing.T) {
 }
 
 func TestMultiLineInputClickSetsWrappedCursor(t *testing.T) {
+	// W=4 reserves the rightmost column for the scrollbar, so text wraps at width
+	// 3: "abc"/"def". Clicking col 1 of the second row lands the caret at index 4.
 	input := NewMultiLineInput("abcdef", Rect{X: 0, Y: 0, W: 4, H: 2})
 	component := input.Component
 	_ = input.handleClick(component, tui.ClickEvent{X: 1, Y: 1, Down: true})
-	if input.CursorY != 0 || input.CursorX != 5 {
-		t.Fatalf("expected wrapped click cursor at (0,5), got (%d,%d)", input.CursorY, input.CursorX)
+	if input.CursorY != 0 || input.CursorX != 4 {
+		t.Fatalf("expected wrapped click cursor at (0,4), got (%d,%d)", input.CursorY, input.CursorX)
 	}
 }
 

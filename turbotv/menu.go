@@ -7,6 +7,11 @@ type MenuShortcut struct {
 	Key     tui.KeyCode
 	Rune    rune
 	Ctrl    bool
+	// Shift and Alt extend accelerators beyond Ctrl combos so chords like Shift+F1
+	// or Ctrl+Shift+S (and bare function-key accelerators, with Key set to KeyF1…)
+	// can be bound (issue #61).
+	Shift bool
+	Alt   bool
 }
 
 type MenuItem struct {
@@ -15,6 +20,16 @@ type MenuItem struct {
 	Children []*MenuItem
 	OnSelect func()
 	Enabled  bool
+
+	// Separator draws a non-selectable horizontal rule instead of a label and is
+	// skipped by keyboard/mouse navigation.
+	Separator bool
+
+	// Checkable items render a √/○ glyph in the label gutter; activating one flips
+	// Checked and calls OnToggle (instead of OnSelect).
+	Checkable bool
+	Checked   bool
+	OnToggle  func(checked bool)
 }
 
 func NewMenuItem(label string, onSelect func()) *MenuItem {
@@ -33,12 +48,44 @@ func NewSubMenu(label string, children ...*MenuItem) *MenuItem {
 	}
 }
 
+// NewSeparator returns a non-selectable divider for use between menu items.
+func NewSeparator() *MenuItem {
+	return &MenuItem{Separator: true}
+}
+
+// NewCheckMenuItem returns a checkable (toggle) menu item. Activating it flips its
+// Checked state and invokes onToggle with the new value.
+func NewCheckMenuItem(label string, checked bool, onToggle func(checked bool)) *MenuItem {
+	return &MenuItem{
+		Label:     label,
+		Enabled:   true,
+		Checkable: true,
+		Checked:   checked,
+		OnToggle:  onToggle,
+	}
+}
+
 func (m *MenuItem) WithShortcut(display string, key tui.KeyCode, r rune, ctrl bool) *MenuItem {
 	m.Shortcut = &MenuShortcut{
 		Display: display,
 		Key:     key,
 		Rune:    r,
 		Ctrl:    ctrl,
+	}
+	return m
+}
+
+// WithShortcutMod is the modifier-aware form of WithShortcut: it binds a shortcut
+// carrying any combination of Ctrl/Shift/Alt, enabling chords such as Shift+F1 or
+// Ctrl+Shift+S and bare function-key accelerators (pass key = tui.KeyF1…, r = 0).
+func (m *MenuItem) WithShortcutMod(display string, key tui.KeyCode, r rune, ctrl bool, shift bool, alt bool) *MenuItem {
+	m.Shortcut = &MenuShortcut{
+		Display: display,
+		Key:     key,
+		Rune:    r,
+		Ctrl:    ctrl,
+		Shift:   shift,
+		Alt:     alt,
 	}
 	return m
 }
@@ -55,6 +102,7 @@ type MenuBar struct {
 	SelectBG  tui.Color
 	Shadow    bool
 	ShadowCol tui.Color
+	ShadowSty ShadowStyle
 
 	openPath     []int
 	hoverPath    []int
@@ -65,21 +113,24 @@ type MenuBar struct {
 type menuPopupLayout struct {
 	rect      Rect
 	items     []*MenuItem
-	itemRects []Rect
+	itemRects []Rect // one per item; off-screen (scrolled-out) rows are the zero Rect
 	path      []int
+	offset    int  // index of the first visible item when the popup scrolls
+	scrollbar bool // true when the list is taller than the visible area
 }
 
 func NewMenuBar(bounds Rect, menus ...*MenuItem) *MenuBar {
 	bar := &MenuBar{
 		Menus:     menus,
-		FG:        tui.ANSIColor(0),
-		BG:        tui.ANSIColor(7),
-		HotFG:     tui.ANSIColor(9),
-		HotBG:     tui.ANSIColor(7),
-		SelectFG:  tui.ANSIColor(15),
-		SelectBG:  tui.ANSIColor(4),
+		FG:        activeTheme.MenuBarFG,
+		BG:        activeTheme.MenuBarBG,
+		HotFG:     activeTheme.MenuHotFG,
+		HotBG:     activeTheme.MenuHotBG,
+		SelectFG:  activeTheme.MenuSelectFG,
+		SelectBG:  activeTheme.MenuSelectBG,
 		Shadow:    true,
-		ShadowCol: DefaultTheme.WindowShadow,
+		ShadowCol: activeTheme.MenuShadow,
+		ShadowSty: DefaultShadowStyle,
 		openPath:  []int{},
 		hoverPath: []int{},
 	}
@@ -113,18 +164,34 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 			// highlight reads as a solid block, not just the letters.
 			surface.Fill(rect, tui.Cell{Ch: ' ', FG: style.FG, BG: style.BG})
 		}
-		drawMnemonic(surface, rect.X+1, rect.Y, item.Label, style, highlight, m.HotFG)
+		if !item.Enabled {
+			style.FG = tui.ANSIColor(8)
+		}
+		drawMnemonic(surface, rect.X+1, rect.Y, item.Label, style, highlight && item.Enabled, m.HotFG)
 	}
 
-	m.popupLayouts = m.layoutPopups()
+	// The popup geometry is clamped/flipped against the full screen so right-edge
+	// menus and their submenus stay on-screen, so it needs the surface dimensions.
+	clip := surface.Clip()
+	m.popupLayouts = m.layoutPopups(clip.X+clip.W, clip.Y+clip.H)
 	for _, popup := range m.popupLayouts {
 		if m.Shadow {
-			surface.DrawShadow(popup.rect, m.ShadowCol)
+			surface.DrawShadow(popup.rect, m.ShadowCol, m.ShadowSty)
 		}
 		surface.Fill(popup.rect, tui.Cell{Ch: ' ', FG: m.FG, BG: m.BG})
 		surface.DrawBox(popup.rect, tui.LineSingle, m.FG, m.BG)
+		gutter := menuGutter(popup.items)
 		for index, item := range popup.items {
 			lineRect := popup.itemRects[index]
+			if lineRect.Empty() {
+				continue // scrolled out of view
+			}
+			if item.Separator {
+				for x := popup.rect.X + 1; x < popup.rect.Right(); x++ {
+					surface.SetCell(x, lineRect.Y, tui.Cell{Ch: '─', FG: m.FG, BG: m.BG})
+				}
+				continue
+			}
 			path := append(append([]int{}, popup.path...), index)
 			style := tui.Cell{FG: m.FG, BG: m.BG}
 			if pathsEqual(path, m.hoverPath) || pathsEqual(path, m.openPath) {
@@ -136,10 +203,21 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 			// Fill the full row so the selection highlight runs edge to edge with
 			// no gap between the label and the shortcut hint.
 			surface.Fill(lineRect, tui.Cell{Ch: ' ', FG: style.FG, BG: style.BG})
-			drawMnemonic(surface, lineRect.X+1, lineRect.Y, item.Label, style, item.Enabled, m.HotFG)
+			labelX := lineRect.X + 1
+			if gutter > 0 {
+				if item.Checkable {
+					glyph := '○'
+					if item.Checked {
+						glyph = '√'
+					}
+					surface.SetCell(lineRect.X+1, lineRect.Y, tui.Cell{Ch: glyph, FG: style.FG, BG: style.BG, Bold: style.Bold})
+				}
+				labelX = lineRect.X + 1 + gutter
+			}
+			drawMnemonic(surface, labelX, lineRect.Y, item.Label, style, item.Enabled, m.HotFG)
 			if item.Shortcut != nil && item.Shortcut.Display != "" {
 				shortX := lineRect.Right() - len([]rune(item.Shortcut.Display)) - 1
-				if shortX > lineRect.X+1 {
+				if shortX > labelX {
 					surface.WriteString(shortX, lineRect.Y, item.Shortcut.Display, style)
 				}
 			}
@@ -147,7 +225,23 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 				surface.WriteString(lineRect.Right()-1, lineRect.Y, "►", style)
 			}
 		}
+		if popup.scrollbar {
+			visible := popup.rect.H - 2
+			track := Rect{X: popup.rect.Right() - 1, Y: popup.rect.Y + 1, W: 1, H: visible}
+			drawVScrollbar(surface, track, len(popup.items), visible, popup.offset, m.FG, m.BG, true)
+		}
 	}
+}
+
+// menuGutter returns the width reserved at the left of a popup's labels for the
+// check glyph: 2 columns when the popup has any checkable item, else 0.
+func menuGutter(items []*MenuItem) int {
+	for _, item := range items {
+		if item.Checkable {
+			return 2
+		}
+	}
+	return 0
 }
 
 func (m *MenuBar) layoutTopRects(abs Rect) []Rect {
@@ -162,7 +256,10 @@ func (m *MenuBar) layoutTopRects(abs Rect) []Rect {
 	return rects
 }
 
-func (m *MenuBar) layoutPopups() []menuPopupLayout {
+// layoutPopups computes the rect (and per-item rects) of every open dropdown,
+// clamping/flipping each one to stay within appW x appH and capping its height
+// with scrolling so long menus remain reachable. appW/appH are the screen bounds.
+func (m *MenuBar) layoutPopups(appW int, appH int) []menuPopupLayout {
 	if len(m.openPath) == 0 || len(m.topRects) == 0 {
 		return nil
 	}
@@ -176,24 +273,73 @@ func (m *MenuBar) layoutPopups() []menuPopupLayout {
 	}
 	layouts := make([]menuPopupLayout, 0, 4)
 	anchor := m.topRects[topIndex]
-	rect := Rect{X: anchor.X, Y: anchor.Y + 1, W: popupWidth(items), H: len(items) + 2}
 	pathPrefix := []int{topIndex}
 	level := 0
+
+	width := popupWidth(items)
+	// Top-level dropdown drops below its label; flip left when it would overflow
+	// the right edge so the shortcut hints and ► glyphs stay on-screen.
+	x := anchor.X
+	if x+width > appW {
+		x = appW - width
+	}
+	if x < 0 {
+		x = 0
+	}
+	y := anchor.Y + 1
+	topLevel := true
+
 	for {
+		// Slide the box up so it fits on screen; the top-level dropdown stays
+		// anchored to the bar and only caps its height (scrolling instead).
+		boxY := y
+		boxH := len(items) + 2
+		if !topLevel && boxY+boxH > appH {
+			boxY = appH - boxH
+		}
+		if boxY < 0 {
+			boxY = 0
+		}
+		if boxY+boxH > appH {
+			boxH = appH - boxY
+		}
+		if boxH < 3 {
+			boxH = 3
+		}
+		rect := Rect{X: x, Y: boxY, W: width, H: boxH}
+
+		visible := rect.H - 2
+		selected := -1
+		if len(m.openPath) > level+1 {
+			selected = m.openPath[level+1]
+		}
+		offset, scrollbar := popupScroll(visible, len(items), selected)
+
+		contentW := rect.W - 2
+		if scrollbar {
+			contentW--
+		}
 		itemRects := make([]Rect, len(items))
 		for i := range items {
-			itemRects[i] = Rect{X: rect.X + 1, Y: rect.Y + 1 + i, W: rect.W - 2, H: 1}
+			row := i - offset
+			if row < 0 || row >= visible {
+				itemRects[i] = Rect{} // scrolled out of view
+				continue
+			}
+			itemRects[i] = Rect{X: rect.X + 1, Y: rect.Y + 1 + row, W: contentW, H: 1}
 		}
 		layouts = append(layouts, menuPopupLayout{
 			rect:      rect,
 			items:     items,
 			itemRects: itemRects,
 			path:      append([]int{}, pathPrefix...),
+			offset:    offset,
+			scrollbar: scrollbar,
 		})
+
 		if len(m.openPath) <= level+1 {
 			break
 		}
-		selected := m.openPath[level+1]
 		if selected < 0 || selected >= len(items) {
 			break
 		}
@@ -201,24 +347,59 @@ func (m *MenuBar) layoutPopups() []menuPopupLayout {
 		if len(next.Children) == 0 {
 			break
 		}
-		pathPrefix = append(pathPrefix, selected)
-		rect = Rect{
-			X: rect.Right(),
-			Y: rect.Y + 1 + selected,
-			W: popupWidth(next.Children),
-			H: len(next.Children) + 2,
+		selRect := itemRects[selected]
+		if selRect.Empty() {
+			break
 		}
+		childWidth := popupWidth(next.Children)
+		// Submenus open to the right of the parent popup, flipping to its left when
+		// they would overflow the right edge.
+		x = rect.Right() + 1
+		if x+childWidth > appW {
+			x = rect.X - childWidth
+		}
+		if x < 0 {
+			x = 0
+		}
+		y = selRect.Y
+		pathPrefix = append(pathPrefix, selected)
 		items = next.Children
+		width = childWidth
+		topLevel = false
 		level++
 	}
 	return layouts
 }
 
+// popupScroll returns the first-visible index and whether a scrollbar is needed
+// so that the selected row stays within a window of visible rows.
+func popupScroll(visible int, count int, selected int) (int, bool) {
+	if visible < 1 || count <= visible {
+		return 0, false
+	}
+	offset := 0
+	if selected >= visible {
+		offset = selected - visible + 1
+	}
+	maxOff := count - visible
+	if offset > maxOff {
+		offset = maxOff
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset, true
+}
+
 func popupWidth(items []*MenuItem) int {
 	width := 8
+	gutter := menuGutter(items)
 	for _, item := range items {
+		if item.Separator {
+			continue
+		}
 		text, _ := parseMnemonic(item.Label)
-		rowWidth := len([]rune(text)) + 4
+		rowWidth := len([]rune(text)) + 4 + gutter
 		if item.Shortcut != nil {
 			rowWidth += len([]rune(item.Shortcut.Display)) + 2
 		}
@@ -245,52 +426,97 @@ func (m *MenuBar) hitTest(component *VisualComponent, x int, y int) bool {
 	return false
 }
 
+// handleClick implements the press-to-open, release-to-activate gesture: a press
+// opens/switches menus and highlights leaves, and a release over an enabled leaf
+// fires it. This makes "press the bar, drag onto an item, release" work and
+// cancels cleanly when the release lands outside any item. TV activates on release.
 func (m *MenuBar) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
 	_ = component
-	if !event.Down {
-		return true
-	}
 	if len(m.topRects) == 0 {
 		return false
 	}
+	if event.Down {
+		return m.handlePress(event)
+	}
+	return m.handleRelease(event)
+}
+
+func (m *MenuBar) handlePress(event tui.ClickEvent) bool {
 	for idx, rect := range m.topRects {
-		if rect.Contains(event.X, event.Y) {
-			if len(m.openPath) > 0 && m.openPath[0] == idx {
-				m.openPath = []int{}
-				m.hoverPath = []int{}
-				return true
-			}
-			m.openPath = m.defaultOpenPath(idx)
-			m.hoverPath = []int{idx}
+		if !rect.Contains(event.X, event.Y) {
+			continue
+		}
+		if !m.Menus[idx].Enabled {
+			return true // disabled top menus cannot be opened
+		}
+		if len(m.openPath) > 0 && m.openPath[0] == idx {
+			m.CloseMenus()
 			return true
 		}
+		m.openPath = m.defaultOpenPath(idx)
+		m.hoverPath = []int{idx}
+		return true
 	}
 	for _, popup := range m.popupLayouts {
 		for row, rect := range popup.itemRects {
-			if !rect.Contains(event.X, event.Y) {
+			if rect.Empty() || !rect.Contains(event.X, event.Y) {
 				continue
 			}
-			path := append(append([]int{}, popup.path...), row)
 			item := popup.items[row]
+			if item.Separator {
+				return true
+			}
+			path := append(append([]int{}, popup.path...), row)
 			m.hoverPath = path
 			if !item.Enabled {
 				return true
 			}
 			if len(item.Children) > 0 {
 				m.openPath = path
-				return true
 			}
-			if item.OnSelect != nil {
-				item.OnSelect()
-			}
-			m.openPath = []int{}
-			m.hoverPath = []int{}
+			// Leaves only highlight on press; they fire on the matching release.
 			return true
 		}
 	}
-	m.openPath = []int{}
-	m.hoverPath = []int{}
+	m.CloseMenus()
 	return true
+}
+
+func (m *MenuBar) handleRelease(event tui.ClickEvent) bool {
+	for _, popup := range m.popupLayouts {
+		for row, rect := range popup.itemRects {
+			if rect.Empty() || !rect.Contains(event.X, event.Y) {
+				continue
+			}
+			item := popup.items[row]
+			if item.Separator || !item.Enabled {
+				return true
+			}
+			if len(item.Children) > 0 {
+				m.openPath = append(append([]int{}, popup.path...), row)
+				m.hoverPath = m.openPath
+				return true
+			}
+			m.activateLeaf(item)
+			return true
+		}
+	}
+	// Released on a top menu or outside any item: keep the menu open (cancel).
+	return true
+}
+
+// activateLeaf performs a leaf item's action — toggling a checkable item or
+// invoking OnSelect — and then closes the menu. Shared by mouse and keyboard.
+func (m *MenuBar) activateLeaf(item *MenuItem) {
+	if item.Checkable {
+		item.Checked = !item.Checked
+		if item.OnToggle != nil {
+			item.OnToggle(item.Checked)
+		}
+	} else if item.OnSelect != nil {
+		item.OnSelect()
+	}
+	m.CloseMenus()
 }
 
 // IsOpen reports whether a menu is currently dropped down. While open the menubar
@@ -336,18 +562,14 @@ func (m *MenuBar) HandleKey(event tui.TypeEvent) bool {
 		return true
 	case tui.KeyEnter:
 		item := m.currentItem()
-		if item == nil || !item.Enabled {
+		if item == nil || item.Separator || !item.Enabled {
 			return true
 		}
 		if len(item.Children) > 0 {
-			m.openPath = append(m.openPath, 0)
+			m.openPath = append(m.openPath, firstSelectable(item.Children))
 			return true
 		}
-		if item.OnSelect != nil {
-			item.OnSelect()
-		}
-		m.openPath = []int{}
-		m.hoverPath = []int{}
+		m.activateLeaf(item)
 		return true
 	case tui.KeyUp:
 		m.moveSelection(-1)
@@ -357,31 +579,29 @@ func (m *MenuBar) HandleKey(event tui.TypeEvent) bool {
 		return true
 	case tui.KeyLeft:
 		// Step back out of a nested submenu, otherwise switch to the previous
-		// top-level menu (opening its dropdown).
+		// enabled top-level menu (opening its dropdown).
 		if len(m.openPath) > 2 {
 			m.openPath = m.openPath[:len(m.openPath)-1]
 			return true
 		}
-		if len(m.Menus) > 0 {
-			prev := (m.openPath[0] - 1 + len(m.Menus)) % len(m.Menus)
+		if prev := m.adjacentTop(m.openPath[0], -1); prev >= 0 {
 			m.openPath = m.defaultOpenPath(prev)
 			m.hoverPath = []int{prev}
-			return true
 		}
+		return true
 	case tui.KeyRight:
 		// Descend into a submenu if the selected item has one, otherwise switch
-		// to the next top-level menu (opening its dropdown).
+		// to the next enabled top-level menu (opening its dropdown).
 		item := m.currentItem()
 		if item != nil && len(item.Children) > 0 {
-			m.openPath = append(m.openPath, 0)
+			m.openPath = append(m.openPath, firstSelectable(item.Children))
 			return true
 		}
-		if len(m.Menus) > 0 {
-			next := (m.openPath[0] + 1) % len(m.Menus)
+		if next := m.adjacentTop(m.openPath[0], 1); next >= 0 {
 			m.openPath = m.defaultOpenPath(next)
 			m.hoverPath = []int{next}
-			return true
 		}
+		return true
 	case tui.KeyRune:
 		if event.Alt {
 			// Alt+letter first tries to switch to another top-level menu; if no top
@@ -399,7 +619,36 @@ func (m *MenuBar) HandleKey(event tui.TypeEvent) bool {
 		m.selectByMnemonic(unicodeLower(event.Rune))
 		return true
 	}
-	return true
+	// Genuinely unhandled keys (e.g. Ctrl combos, function keys) bubble out so the
+	// desktop can still fire global accelerators / unhandledKeyFn while a menu is open.
+	return false
+}
+
+// adjacentTop returns the index of the nearest enabled top-level menu starting
+// from start and stepping by delta (wrapping), or -1 when none is enabled.
+func (m *MenuBar) adjacentTop(start int, delta int) int {
+	n := len(m.Menus)
+	if n == 0 {
+		return -1
+	}
+	idx := start
+	for i := 0; i < n; i++ {
+		idx = (idx + delta + n) % n
+		if m.Menus[idx].Enabled {
+			return idx
+		}
+	}
+	return -1
+}
+
+// firstSelectable returns the index of the first non-separator item, or 0.
+func firstSelectable(items []*MenuItem) int {
+	for i, item := range items {
+		if !item.Separator {
+			return i
+		}
+	}
+	return 0
 }
 
 // selectByMnemonic activates (or descends into) the item at the current popup
@@ -411,19 +660,15 @@ func (m *MenuBar) selectByMnemonic(lower rune) bool {
 	}
 	depth := len(m.openPath) - 1
 	for index, item := range items {
-		if !item.Enabled || labelMnemonic(item.Label) != lower {
+		if item.Separator || !item.Enabled || labelMnemonic(item.Label) != lower {
 			continue
 		}
 		m.openPath[depth] = index
 		if len(item.Children) > 0 {
-			m.openPath = append(m.openPath, 0)
+			m.openPath = append(m.openPath, firstSelectable(item.Children))
 			return true
 		}
-		if item.OnSelect != nil {
-			item.OnSelect()
-		}
-		m.openPath = []int{}
-		m.hoverPath = []int{}
+		m.activateLeaf(item)
 		return true
 	}
 	return false
@@ -467,7 +712,15 @@ func (m *MenuBar) moveSelection(delta int) {
 	}
 	depth := len(m.openPath) - 1
 	current := m.openPath[depth]
-	m.openPath[depth] = (current + delta + len(items)) % len(items)
+	n := len(items)
+	// Step over separators so the highlight always lands on a real item.
+	for i := 0; i < n; i++ {
+		current = (current + delta + n) % n
+		if !items[current].Separator {
+			m.openPath[depth] = current
+			return
+		}
+	}
 }
 
 func (m *MenuBar) itemsAtCurrentDepth() []*MenuItem {
@@ -491,15 +744,19 @@ func (m *MenuBar) defaultOpenPath(top int) []int {
 	if top < 0 || top >= len(m.Menus) {
 		return []int{}
 	}
-	if len(m.Menus[top].Children) > 0 {
-		return []int{top, 0}
+	item := m.Menus[top]
+	if !item.Enabled {
+		return []int{} // disabled top menus do not open
+	}
+	if len(item.Children) > 0 {
+		return []int{top, firstSelectable(item.Children)}
 	}
 	return []int{top}
 }
 
 func (m *MenuBar) OpenTopByMnemonic(lower rune) bool {
 	for idx, item := range m.Menus {
-		if labelMnemonic(item.Label) == lower {
+		if item.Enabled && labelMnemonic(item.Label) == lower {
 			m.openPath = m.defaultOpenPath(idx)
 			m.hoverPath = []int{idx}
 			return true
@@ -538,6 +795,12 @@ func matchShortcut(event tui.TypeEvent, shortcut *MenuShortcut) bool {
 		}
 	}
 	if shortcut.Ctrl != event.Ctrl {
+		return false
+	}
+	if shortcut.Shift != event.Shift {
+		return false
+	}
+	if shortcut.Alt != event.Alt {
 		return false
 	}
 	return true

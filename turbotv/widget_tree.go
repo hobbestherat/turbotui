@@ -1,8 +1,6 @@
 package tv
 
 import (
-	"strings"
-
 	tui "github.com/hobbestherat/turbotui"
 )
 
@@ -40,22 +38,37 @@ type Tree struct {
 	BG        tui.Color
 	SelFG     tui.Color
 	SelBG     tui.Color
-	selected  int
-	offset    int
-	viewH     int // visible row count from the last draw (for ensureVisible)
+	// SelFGUnfocused/SelBGUnfocused paint the selection bar when the tree does
+	// not hold focus, so a focused list's bright bar is unambiguous next to an
+	// unfocused one (Turbo-Vision convention: dim/hollow bar when inactive).
+	SelFGUnfocused tui.Color
+	SelBGUnfocused tui.Color
+	selected       int
+	offset         int
+	viewH          int // visible row count from the last draw (for ensureVisible)
 	// OnActivate fires on Enter for the selected node; OnSelect fires whenever
 	// the selection changes.
 	OnActivate func(*TreeNode)
 	OnSelect   func(*TreeNode)
+
+	// flatBuf is reused across flatten() calls so the visible-rows slice is not
+	// reallocated on every draw/click/scroll; it is recomputed (correctly) each
+	// call because it just walks the live node tree.
+	flatBuf []treeRow
 }
 
 // NewTree creates an empty tree view.
 func NewTree(bounds Rect) *Tree {
 	t := &Tree{
-		FG:    DefaultTheme.WindowFG,
-		BG:    DefaultTheme.WindowBG,
-		SelFG: DefaultTheme.SelectionFG,
-		SelBG: DefaultTheme.SelectionBG,
+		FG:    activeTheme.WindowFG,
+		BG:    activeTheme.WindowBG,
+		SelFG: activeTheme.SelectionFG,
+		SelBG: activeTheme.SelectionBG,
+		// Dimmed bar for the unfocused state: a dark-grey background keeps the
+		// row distinguishable from the body without competing with the focused
+		// tree's bright bar.
+		SelFGUnfocused: activeTheme.WindowFG,
+		SelBGUnfocused: tui.ANSIColor(8),
 	}
 	t.Component = NewComponent(bounds)
 	t.Component.Focusable = true
@@ -81,8 +94,14 @@ func (t *Tree) Selected() *TreeNode {
 	}
 	return nil
 }
+
+// flatten returns the currently visible rows (depth-first, skipping collapsed
+// subtrees). It reuses flatBuf across calls so the slice's backing array is not
+// reallocated on every draw/handler; the contents are recomputed each call from
+// the live node tree, so it always reflects the current expand/collapse state.
+// Callers must not retain the slice across another flatten() call.
 func (t *Tree) flatten() []treeRow {
-	var rows []treeRow
+	rows := t.flatBuf[:0]
 	var walk func(nodes []*TreeNode, depth int)
 	walk = func(nodes []*TreeNode, depth int) {
 		for _, n := range nodes {
@@ -93,6 +112,7 @@ func (t *Tree) flatten() []treeRow {
 		}
 	}
 	walk(t.Roots, 0)
+	t.flatBuf = rows
 	return rows
 }
 func (t *Tree) draw(component *VisualComponent, surface Surface) {
@@ -120,9 +140,18 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 		r := rows[idx]
 		fg, bg := t.FG, t.BG
 		if idx == t.selected {
-			fg, bg = t.SelFG, t.SelBG
+			// A focused tree gets the bright selection bar; an unfocused one
+			// gets the dim variant so keyboard focus is never ambiguous when
+			// several lists share the screen.
+			if component.Focused() {
+				fg, bg = t.SelFG, t.SelBG
+			} else {
+				fg, bg = t.SelFGUnfocused, t.SelBGUnfocused
+			}
 		}
 		y := abs.Y + row
+		// Paint the entire row width as a bar so the highlight reads at a glance,
+		// not just under the glyphs.
 		surface.Fill(Rect{X: abs.X, Y: y, W: textW, H: 1}, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 		marker := " "
 		if len(r.node.Children) > 0 {
@@ -132,19 +161,48 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 				marker = "▸"
 			}
 		}
-		line := strings.Repeat("  ", r.depth) + marker + " " + r.node.Label
-		runes := []rune(line)
-		if len(runes) > textW {
-			runes = runes[:textW]
+		// The indent is just blank columns already painted by the row fill above,
+		// so write the content at an offset instead of building (and allocating) a
+		// "  "-repeated prefix on every visible row each frame.
+		indent := r.depth * 2
+		avail := textW - indent
+		if avail <= 0 {
+			continue
 		}
-		surface.WriteString(abs.X, y, string(runes), tui.Cell{FG: fg, BG: bg})
+		// Truncate with a trailing ellipsis so overflow is signalled rather than
+		// silently cutting mid-text. Truncate is display-width aware (wide glyphs
+		// are not split).
+		content := Truncate(marker+" "+r.node.Label, avail, "…")
+		surface.WriteString(abs.X+indent, y, content, tui.Cell{FG: fg, BG: bg})
 	}
 	if needBar {
 		track := Rect{X: abs.X + abs.W - 1, Y: abs.Y, W: 1, H: abs.H}
 		drawVScrollbar(surface, track, len(rows), abs.H, t.offset,
-			DefaultTheme.WindowBorderFG, t.BG, component.HasFocus)
+			activeTheme.WindowBorderFG, t.BG, component.Focused())
 	}
 }
+
+// pageStep is the row jump for PageUp/PageDown: one visible viewport, falling
+// back to a single row before the first draw establishes viewH.
+func (t *Tree) pageStep() int {
+	if t.viewH > 1 {
+		return t.viewH
+	}
+	return 1
+}
+
+// moveSelection sets the selection to a clamped row index, scrolling it into
+// view and firing OnSelect only when it actually changes.
+func (t *Tree) moveSelection(to int, rows []treeRow) {
+	to = clampInt(to, 0, len(rows)-1)
+	if to == t.selected {
+		return
+	}
+	t.selected = to
+	t.ensureVisible()
+	t.fireSelect(rows)
+}
+
 func (t *Tree) clampSelection(total int) {
 	if t.selected > total-1 {
 		t.selected = total - 1
@@ -193,6 +251,14 @@ func (t *Tree) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 			t.ensureVisible()
 			t.fireSelect(rows)
 		}
+	case tui.KeyHome:
+		t.moveSelection(0, rows)
+	case tui.KeyEnd:
+		t.moveSelection(len(rows)-1, rows)
+	case tui.KeyPageUp:
+		t.moveSelection(t.selected-t.pageStep(), rows)
+	case tui.KeyPageDown:
+		t.moveSelection(t.selected+t.pageStep(), rows)
 	case tui.KeyRight:
 		n := rows[t.selected].node
 		if len(n.Children) > 0 && !n.Expanded {

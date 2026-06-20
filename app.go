@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -36,6 +37,18 @@ const (
 	KeyPageDown
 	KeyInsert
 	KeyDelete
+	KeyF1
+	KeyF2
+	KeyF3
+	KeyF4
+	KeyF5
+	KeyF6
+	KeyF7
+	KeyF8
+	KeyF9
+	KeyF10
+	KeyF11
+	KeyF12
 )
 
 type MouseButton uint8
@@ -58,7 +71,21 @@ type ClickEvent struct {
 	X      int
 	Y      int
 	Button MouseButton
-	Down   bool
+	// Down is true for a button press and stays true for the motion ("drag")
+	// reports the terminal emits while the button is held; it is false on release.
+	// Existing drag-aware widgets rely on Down remaining set during a drag, so use
+	// Drag to tell a fresh press apart from a continued drag.
+	Down bool
+	// Drag is true for a motion report received while a button is held (Down is
+	// also true). Move is true for a motion report with no button held (Down is
+	// false). Both require the terminal's motion-tracking mode (?1002h/?1003h).
+	Drag bool
+	Move bool
+	// Keyboard modifiers active when the event was generated, when the terminal
+	// reports them (SGR mouse encoding bits 4/8/16).
+	Shift bool
+	Alt   bool
+	Ctrl  bool
 }
 
 // PasteEvent carries a block of text the terminal delivered via bracketed paste
@@ -79,10 +106,23 @@ type ResizeEvent struct {
 	Height int
 }
 
+// App is the terminal application engine: a double-buffered cell grid plus an
+// input-driven event loop. Its zero value is NOT usable (it has no output writer
+// and an unbuffered/nil post queue) — construct one with New, NewWithIO or
+// NewWithSize.
 type App struct {
 	in      *os.File
 	out     io.Writer
 	termOut *os.File
+
+	// writeMu serializes raw writes to out so a CopyToClipboard call from a
+	// background goroutine cannot interleave its OSC 52 bytes with an Apply
+	// frame and corrupt the escape stream.
+	writeMu sync.Mutex
+
+	// clipboardBackend selects how CopyToClipboard delivers text. Its zero value
+	// is ClipboardOSC52AndNative.
+	clipboardBackend ClipboardBackend
 
 	width  int
 	height int
@@ -101,7 +141,30 @@ type App struct {
 	parser       inputParser
 	started      bool
 
-	postChannel chan func()
+	// Posted closures live in an unbounded, mutex-guarded mailbox rather than a
+	// fixed channel: Post must never block the event-loop goroutine (a handler that
+	// re-enters Post on a full buffer would otherwise deadlock — issue #20).
+	// postNotify is a wake-up signal (it carries no data); the loop drains postQueue.
+	postMu     sync.Mutex
+	postQueue  []func()
+	postNotify chan struct{}
+
+	// dirty/redrawFn implement redraw coalescing (issue #17): mutations request a
+	// redraw instead of flushing, and the loop redraws at most once after draining a
+	// burst of posts. redrawFn is nil for bare App users, who flush via Apply.
+	dirty    bool
+	redrawFn func()
+
+	// flushBuf is reused across Apply calls so a frame's escape stream is built with
+	// no per-cell allocation (issue #15).
+	flushBuf []byte
+
+	// applyErr holds the terminal write error (if any) recorded by the most
+	// recent Apply. onApplyError, when set, is invoked with that error. Run
+	// treats a non-nil applyErr as fatal so the app exits cleanly instead of
+	// continuing to render against a dead output (e.g. a closed pipe).
+	applyErr     error
+	onApplyError func(error)
 
 	// Hardware cursor state. cursorVisible/X/Y is the desired state; the front*
 	// fields track what was last emitted so Apply only writes cursor escapes on
@@ -128,13 +191,36 @@ func (a *App) HideCursor() {
 	a.cursorVisible = false
 }
 
-func New() (*App, error) {
+// New creates an App sized to the current terminal. A failure to read the
+// terminal size (e.g. when stdout is not a tty) is not an error: it falls back
+// to an 80×25 size, mirroring NewWithSize. The failure that actually matters —
+// stdin/stdout not being a real terminal — surfaces later from Run. Use
+// Validate to detect that up front.
+func New() *App {
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width < 1 || height < 1 {
 		width = 80
 		height = 25
 	}
-	return NewWithIO(os.Stdin, os.Stdout, width, height), nil
+	return NewWithIO(os.Stdin, os.Stdout, width, height)
+}
+
+// Validate reports whether the App is attached to a real terminal — the check
+// that New (intentionally) does not perform, since size detection has a sane
+// fallback. It returns nil for buffer-backed apps built with NewWithSize (which
+// have no terminal by design). Call it right after New when you want to fail
+// fast with a clear message instead of waiting for Run.
+func (a *App) Validate() error {
+	if a.termOut == nil {
+		return nil
+	}
+	if a.in == nil || !term.IsTerminal(int(a.in.Fd())) {
+		return errors.New("turbotui: stdin is not a terminal")
+	}
+	if !term.IsTerminal(int(a.termOut.Fd())) {
+		return errors.New("turbotui: stdout is not a terminal")
+	}
+	return nil
 }
 
 func NewWithIO(in *os.File, out *os.File, width int, height int) *App {
@@ -152,22 +238,28 @@ func NewWithSize(width int, height int, out io.Writer) *App {
 		height = 1
 	}
 	app := &App{
-		out:         out,
-		width:       width,
-		height:      height,
-		front:       newScreen(width, height, Cell{}),
-		back:        newScreen(width, height, DefaultCell()),
-		lines:       make([]lineCell, width*height),
-		postChannel: make(chan func(), 64),
+		out:        out,
+		width:      width,
+		height:     height,
+		front:      newScreen(width, height, Cell{}),
+		back:       newScreen(width, height, DefaultCell()),
+		lines:      make([]lineCell, width*height),
+		postNotify: make(chan struct{}, 1),
 	}
 	app.invalidateFront()
 	return app
 }
 
+// Width returns the current grid width. Like Height and the handler-registration
+// methods (OnClick, OnType, …), it reads loop-goroutine state without
+// synchronization: call it before Run, or from inside a handler / a Post callback
+// (which run on the loop goroutine). Reading it directly from a background
+// goroutine while Run is active is a data race — route through Post (issue #21).
 func (a *App) Width() int {
 	return a.width
 }
 
+// Height returns the current grid height. See Width for the threading contract.
 func (a *App) Height() int {
 	return a.height
 }
@@ -176,6 +268,11 @@ func (a *App) ReadCell(x int, y int) Cell {
 	return a.back.get(x, y)
 }
 
+// OnClick registers a click handler. Handlers are dispatched on the event-loop
+// goroutine and the handler slices are not synchronized, so register handlers
+// before Run or from inside another handler / a Post callback — never from a
+// background goroutine while Run is active (issue #21). The same applies to
+// OnScroll, OnType, OnPaste and OnResize.
 func (a *App) OnClick(handler func(ClickEvent)) {
 	a.clickHandlers = append(a.clickHandlers, handler)
 }
@@ -197,11 +294,91 @@ func (a *App) OnPaste(handler func(PasteEvent)) {
 // Post schedules fn to run on the event-loop goroutine. It is safe to call from
 // any goroutine, which makes it the way to mutate UI state from a background
 // task (timers, network calls, …) and then trigger a redraw.
+//
+// Post never blocks and never drops an update: closures are appended to an
+// unbounded mailbox. In particular a handler running on the loop goroutine may
+// re-enter Post safely — the loop keeps draining the mailbox, so there is no
+// self-deadlock even under a burst of updates (issue #20).
 func (a *App) Post(fn func()) {
 	if fn == nil {
 		return
 	}
-	a.postChannel <- fn
+	a.postMu.Lock()
+	a.postQueue = append(a.postQueue, fn)
+	a.postMu.Unlock()
+	// Wake the loop. The buffer-of-1 notify channel coalesces multiple posts into a
+	// single wake-up; the loop drains everything once woken.
+	select {
+	case a.postNotify <- struct{}{}:
+	default:
+	}
+}
+
+// TryPost enqueues fn and reports whether it was scheduled. With the unbounded
+// mailbox Post never blocks, so TryPost always succeeds for a non-nil fn; it is
+// retained for API compatibility with callers that branched on its result.
+func (a *App) TryPost(fn func()) bool {
+	if fn == nil {
+		return true
+	}
+	a.Post(fn)
+	return true
+}
+
+// drainPosts runs every queued closure, including ones enqueued by those closures
+// (re-entrant Post), until the mailbox is empty. It runs on the loop goroutine.
+func (a *App) drainPosts() {
+	for {
+		a.postMu.Lock()
+		if len(a.postQueue) == 0 {
+			a.postQueue = a.postQueue[:0]
+			a.postMu.Unlock()
+			return
+		}
+		fn := a.postQueue[0]
+		a.postQueue = a.postQueue[1:]
+		a.postMu.Unlock()
+		fn()
+	}
+}
+
+// SetRedrawFn registers the function used to repaint the screen when a coalesced
+// redraw is due (see RequestRedraw). The tv.Desktop sets this to its compose+Apply
+// path; bare App users typically leave it unset and call Apply directly.
+func (a *App) SetRedrawFn(fn func()) {
+	a.redrawFn = fn
+}
+
+// RequestRedraw marks the screen dirty without painting. The event loop coalesces
+// all requests accumulated while draining a burst of posts/events into a single
+// redrawFn call per iteration, so streaming N updates costs one repaint and one
+// write instead of N (issue #17). It is a no-op when no redrawFn is registered.
+func (a *App) RequestRedraw() {
+	a.dirty = true
+}
+
+// flushDirty performs at most one coalesced redraw. Called once per event-loop
+// iteration after all immediately-available work has been drained.
+func (a *App) flushDirty() {
+	if a.dirty && a.redrawFn != nil {
+		a.dirty = false
+		a.redrawFn()
+	}
+}
+
+// OnApplyError registers a callback invoked when Apply fails to write to the
+// terminal (e.g. stdout was closed or redirected onto a broken pipe). It fires
+// before Run treats the error as fatal, giving the app a chance to log or
+// customise. Leaving it unset is fine: Run still returns the error and exits.
+func (a *App) OnApplyError(fn func(error)) {
+	a.onApplyError = fn
+}
+
+// LastApplyError returns the terminal write error recorded by the most recent
+// Apply, or nil. Run returns this same error and exits the loop when it is
+// non-nil, so callers can inspect it after Run returns.
+func (a *App) LastApplyError() error {
+	return a.applyErr
 }
 
 func (a *App) OnResize(handler func(ResizeEvent)) {
@@ -218,7 +395,77 @@ func (a *App) Clear(cell Cell) {
 	}
 }
 
+// WriteCell writes a single cell, accounting for the glyph's display width: a
+// double-width rune also lays down a continuation cell to its right, and writing
+// over either half of an existing wide glyph blanks its orphaned other half.
 func (a *App) WriteCell(x int, y int, cell Cell) {
+	cell.cont = false
+	width := RuneWidth(cell.Ch)
+	if width < 1 {
+		// A bare combining mark has nothing to attach to here; render it as a
+		// single placeholder column rather than collapsing the cell.
+		width = 1
+	}
+	a.place(x, y, cell, width)
+}
+
+// place writes cell at (x,y) as a glyph that occupies width columns (1 or 2),
+// keeping the cell model consistent with what the terminal will render.
+func (a *App) place(x int, y int, cell Cell, width int) {
+	a.clearWideAt(x, y)
+	if width >= 2 {
+		// A wide glyph that would straddle the right edge cannot be drawn without
+		// the terminal wrapping; substitute a blank so the row stays aligned.
+		if !a.back.inBounds(x+1, y) {
+			cell.Ch = ' '
+			cell.Combining = ""
+			a.setCellTracked(x, y, cell)
+			return
+		}
+		a.clearWideAt(x+1, y)
+		a.setCellTracked(x, y, cell)
+		a.setCellTracked(x+1, y, Cell{
+			Ch:        ' ',
+			FG:        cell.FG,
+			BG:        cell.BG,
+			Bold:      cell.Bold,
+			Underline: cell.Underline,
+			cont:      true,
+		})
+		return
+	}
+	a.setCellTracked(x, y, cell)
+}
+
+// clearWideAt blanks the dangling half of a wide glyph that an upcoming write to
+// (x,y) would partially overwrite, so a leftover continuation column or orphaned
+// left half never lingers on screen.
+func (a *App) clearWideAt(x int, y int) {
+	if !a.back.inBounds(x, y) {
+		return
+	}
+	current := a.back.get(x, y)
+	if current.cont {
+		if a.back.inBounds(x-1, y) {
+			base := a.back.get(x-1, y)
+			base.Ch = ' '
+			base.Combining = ""
+			a.setCellTracked(x-1, y, base)
+		}
+		return
+	}
+	if RuneWidth(current.Ch) >= 2 && a.back.inBounds(x+1, y) {
+		right := a.back.get(x+1, y)
+		if right.cont {
+			a.setCellTracked(x+1, y, Cell{Ch: ' ', FG: right.FG, BG: right.BG})
+		}
+	}
+}
+
+// setCellTracked writes a cell verbatim and invalidates the line-drawing cache
+// for that position. It performs no width handling and is the low-level write
+// shared by place and clearWideAt.
+func (a *App) setCellTracked(x int, y int, cell Cell) {
 	if cell.Ch == 0 {
 		cell.Ch = ' '
 	}
@@ -231,11 +478,35 @@ func (a *App) WriteCell(x int, y int, cell Cell) {
 
 func (a *App) WriteString(x int, y int, text string, style Cell) {
 	column := x
+	lastBase := -1
 	for _, ch := range text {
-		style.Ch = ch
-		a.WriteCell(column, y, style)
-		column++
+		width := RuneWidth(ch)
+		if width == 0 {
+			a.attachCombining(lastBase, y, ch)
+			continue
+		}
+		cell := style
+		cell.Ch = ch
+		cell.Combining = ""
+		a.place(column, y, cell, width)
+		lastBase = column
+		column += width
 	}
+}
+
+// attachCombining folds a zero-width mark into the base cell previously written
+// at (x,y) so the grapheme renders together. Marks with no base (e.g. a string
+// that opens with a combining char) are dropped.
+func (a *App) attachCombining(x int, y int, mark rune) {
+	if x < 0 || !a.back.inBounds(x, y) {
+		return
+	}
+	base := a.back.get(x, y)
+	if base.cont {
+		return
+	}
+	base.Combining += string(mark)
+	a.setCellTracked(x, y, base)
 }
 
 func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell) int {
@@ -253,7 +524,11 @@ func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell)
 			}
 			return
 		}
-		needed := len(word)
+		wordWidth := 0
+		for _, r := range word {
+			wordWidth += RuneWidth(r)
+		}
+		needed := wordWidth
 		if col > 0 {
 			needed++
 		}
@@ -263,17 +538,29 @@ func (a *App) WriteWrappedText(x int, y int, width int, text string, style Cell)
 		}
 		if col > 0 {
 			style.Ch = ' '
-			a.WriteCell(x+col, y+line, style)
+			style.Combining = ""
+			a.place(x+col, y+line, style, 1)
 			col++
 		}
+		lastBase := -1
 		for _, r := range word {
-			if col >= width {
+			runeWidth := RuneWidth(r)
+			if runeWidth == 0 {
+				if lastBase >= 0 {
+					a.attachCombining(x+lastBase, y+line, r)
+				}
+				continue
+			}
+			if col+runeWidth > width {
 				line++
 				col = 0
+				lastBase = -1
 			}
 			style.Ch = r
-			a.WriteCell(x+col, y+line, style)
-			col++
+			style.Combining = ""
+			a.place(x+col, y+line, style, runeWidth)
+			lastBase = col
+			col += runeWidth
 		}
 		word = word[:0]
 	}
@@ -316,23 +603,50 @@ func (a *App) Apply() error {
 	if a.termOut != nil && !a.started {
 		return nil
 	}
-	var output strings.Builder
+	// Wrap the frame in a DEC 2026 synchronized update so the terminal swaps it
+	// atomically instead of rendering partial bytes as they stream in; terminals
+	// that don't understand ?2026 ignore it, so it is safe unconditionally (#16).
+	buf := append(a.flushBuf[:0], syncBegin...)
+	bodyStart := len(buf)
 	style := styleState{}
+	// Track where the terminal cursor sits after the previous write so a run of
+	// adjacent changed cells emits a single CUP instead of one per cell (#14).
+	cursorX, cursorY := -1, -1
 	for y := 0; y < a.height; y++ {
 		rowOffset := y * a.width
 		for x := 0; x < a.width; x++ {
 			index := rowOffset + x
 			next := a.back.cells[index]
-			if a.front.cells[index] == next {
-				continue
-			}
+			// Coerce a zero rune to a space BEFORE the diff so the value compared and
+			// the value stored into front match; otherwise front(' ') != back(0)
+			// would repaint this cell every frame forever (issue #13).
 			if next.Ch == 0 {
 				next.Ch = ' '
 			}
-			output.WriteString(moveCursor(x, y))
-			codes := styleCodes(style, next)
-			output.WriteString(sgr(codes))
-			output.WriteRune(next.Ch)
+			if a.front.cells[index] == next {
+				continue
+			}
+			// The continuation half of a wide glyph carries no output of its own;
+			// the wide glyph to its left already advanced the terminal over this
+			// column. Sync the front buffer and move on.
+			if next.cont {
+				a.front.cells[index] = next
+				continue
+			}
+			if cursorY != y || cursorX != x {
+				buf = appendCursorMove(buf, x, y)
+			}
+			buf = appendStyle(buf, style, next)
+			buf = appendRune(buf, next.Ch)
+			if next.Combining != "" {
+				buf = append(buf, next.Combining...)
+			}
+			width := RuneWidth(next.Ch)
+			if width < 1 {
+				width = 1
+			}
+			cursorX = x + width
+			cursorY = y
 			style = styleState{
 				valid:     true,
 				fg:        next.FG,
@@ -343,31 +657,52 @@ func (a *App) Apply() error {
 			a.front.cells[index] = next
 		}
 	}
-	output.WriteString(a.cursorEscapes())
-	if output.Len() == 0 {
+	buf = a.appendCursorEscapes(buf)
+	if len(buf) == bodyStart {
+		a.flushBuf = buf[:0] // nothing changed; keep the capacity, write nothing
 		return nil
 	}
-	_, err := io.WriteString(a.out, output.String())
+	buf = append(buf, syncEnd...)
+	a.flushBuf = buf
+	a.writeMu.Lock()
+	_, err := a.out.Write(buf)
+	a.writeMu.Unlock()
+	if err != nil {
+		// The terminal went away (broken pipe, redirected/closed stdout, …).
+		// Record it so Run can exit cleanly and surface it to any callback
+		// rather than silently rendering into a dead output.
+		a.applyErr = err
+		if a.onApplyError != nil {
+			a.onApplyError(err)
+		}
+	}
 	return err
 }
 
-// cursorEscapes returns the control sequence needed to bring the real terminal
-// cursor in line with the desired state, or "" when nothing changed.
-func (a *App) cursorEscapes() string {
+// syncBegin/syncEnd wrap a flush in a DEC 2026 synchronized update (issue #16).
+const (
+	syncBegin = "\x1b[?2026h"
+	syncEnd   = "\x1b[?2026l"
+)
+
+// appendCursorEscapes appends the control sequence needed to bring the real
+// terminal cursor in line with the desired state to buf (nothing when unchanged).
+func (a *App) appendCursorEscapes(buf []byte) []byte {
 	if a.cursorVisible {
 		if a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
-			return ""
+			return buf
 		}
 		a.frontCursorVisible = true
 		a.frontCursorX = a.cursorX
 		a.frontCursorY = a.cursorY
-		return moveCursor(a.cursorX, a.cursorY) + "\x1b[?25h"
+		buf = appendCursorMove(buf, a.cursorX, a.cursorY)
+		return append(buf, "\x1b[?25h"...)
 	}
 	if !a.frontCursorVisible {
-		return ""
+		return buf
 	}
 	a.frontCursorVisible = false
-	return "\x1b[?25l"
+	return append(buf, "\x1b[?25l"...)
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -387,10 +722,22 @@ func (a *App) Run(ctx context.Context) error {
 	readChannel := make(chan []byte, 4)
 	errorChannel := make(chan error, 1)
 	go a.readInput(readChannel, errorChannel)
+	// Unblock the reader on every exit path: a.in.Read blocks on the shared stdin,
+	// so without a deadline the goroutine would leak and steal the next keystroke
+	// meant for the parent process or the next TUI (issue #9).
+	defer func() { _ = a.in.SetReadDeadline(time.Now()) }()
 
 	resizeChannel := make(chan os.Signal, 1)
 	signal.Notify(resizeChannel, syscall.SIGWINCH)
 	defer signal.Stop(resizeChannel)
+
+	// Best-effort terminal restoration on fatal signals: a plain defer does not run
+	// when the process is killed by an unhandled signal, which would leave the
+	// terminal in raw mode on the alt screen (issue #22). Ctrl+C is delivered as a
+	// byte in raw mode, so trapping SIGINT only catches an external `kill -INT`.
+	fatalChannel := make(chan os.Signal, 1)
+	signal.Notify(fatalChannel, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	defer signal.Stop(fatalChannel)
 
 	// A lone ESC byte can't be parsed immediately: it might begin an escape
 	// sequence. We hold it briefly and, if nothing follows, flush it as KeyEscape.
@@ -398,6 +745,15 @@ func (a *App) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case sig := <-fatalChannel:
+			// Restore the terminal, then re-raise with the default disposition so the
+			// process dies as the signal intended.
+			a.Close()
+			if s, ok := sig.(syscall.Signal); ok {
+				signal.Reset(s)
+				_ = syscall.Kill(syscall.Getpid(), s)
+			}
 			return nil
 		case err := <-errorChannel:
 			if errors.Is(err, io.EOF) {
@@ -418,21 +774,43 @@ func (a *App) Run(ctx context.Context) error {
 			for _, event := range a.parser.flushLoneEscape() {
 				a.dispatchEvent(event)
 			}
-		case fn := <-a.postChannel:
-			fn()
+		case <-a.postNotify:
+			// Drain the whole mailbox (including posts enqueued by the posts we run)
+			// before redrawing, so a burst of background updates coalesces into a
+			// single redraw/flush (issues #17, #20).
+			a.drainPosts()
 		case <-resizeChannel:
 			a.handleTerminalResize()
+		}
+		// Apply any redraw requested by the work above exactly once.
+		a.flushDirty()
+		// A handler above (e.g. a redraw triggered by an event or Post) may have
+		// failed to flush to the terminal. Treat that as fatal so the app exits
+		// cleanly instead of spinning against a dead output.
+		if a.applyErr != nil {
+			return a.applyErr
 		}
 	}
 }
 
-func (a *App) Close() {
+// teardownSequence resets SGR and disables the modes setupTerminal enabled
+// (bracketed paste, mouse tracking, hidden cursor, alt screen), returning the
+// normal screen. It is written before term.Restore on every teardown path.
+const teardownSequence = "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l"
+
+// restoreTerminal writes the teardown escape sequence and restores cooked mode.
+// It is idempotent: the second call is a no-op once restoreState is cleared.
+func (a *App) restoreTerminal() {
 	if a.restoreState != nil {
-		_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		_, _ = io.WriteString(a.out, teardownSequence)
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
 	}
 	a.started = false
+}
+
+func (a *App) Close() {
+	a.restoreTerminal()
 }
 
 // CloseWithMessage restores the terminal, tears down the alternate screen (so the
@@ -440,12 +818,12 @@ func (a *App) Close() {
 // buffer right after the command that launched the app. The message may span
 // multiple lines and contain ANSI styling (see Styled).
 func (a *App) CloseWithMessage(message string) {
-	_, _ = io.WriteString(a.out, "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 	if a.restoreState != nil {
-		_ = term.Restore(int(a.in.Fd()), a.restoreState)
-		a.restoreState = nil
+		a.restoreTerminal()
+	} else {
+		_, _ = io.WriteString(a.out, teardownSequence)
+		a.started = false
 	}
-	a.started = false
 	message = strings.Trim(message, "\n")
 	if strings.TrimSpace(message) == "" {
 		return
@@ -460,6 +838,10 @@ func (a *App) setupTerminal() error {
 	}
 	a.restoreState = state
 	a.started = true
+	// Clear any read deadline a previous Run left behind when it unblocked the
+	// reader on exit (issue #9); otherwise this Run's reads on a shared stdin would
+	// fail immediately against a deadline already in the past.
+	_ = a.in.SetReadDeadline(time.Time{})
 	_, err = io.WriteString(a.out, "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
 	return err
 }
@@ -505,6 +887,13 @@ func (a *App) dispatchEvent(event any) {
 	}
 }
 
+// Resize changes the logical terminal size and runs the registered resize
+// handlers, exactly as a real terminal SIGWINCH would. It lets embedded/headless
+// callers (and tests) drive reflow without a tty.
+func (a *App) Resize(width int, height int) {
+	a.resize(width, height)
+}
+
 func (a *App) handleTerminalResize() {
 	if a.termOut == nil {
 		return
@@ -531,21 +920,29 @@ func (a *App) resize(width int, height int) {
 	a.back = newScreen(width, height, DefaultCell())
 	a.lines = make([]lineCell, width*height)
 
-	copyWidth := oldWidth
-	if width < copyWidth {
-		copyWidth = width
-	}
-	copyHeight := oldHeight
-	if height < copyHeight {
-		copyHeight = height
-	}
-	for y := 0; y < copyHeight; y++ {
-		for x := 0; x < copyWidth; x++ {
-			sourceIndex := y*oldWidth + x
-			targetIndex := y*width + x
-			a.back.cells[targetIndex] = oldBack.cells[sourceIndex]
-			if sourceIndex < len(oldLines) {
-				a.lines[targetIndex] = oldLines[sourceIndex]
+	// An immediate-mode toolkit (tv.Desktop) recomposes the whole tree from its
+	// resize handler, discarding any preserved content — so copying the old buffer
+	// is dead work and the trailing Apply would be a redundant second flush. Only
+	// preserve content (and self-flush) for bare App users with no resize handler,
+	// who draw once and rely on resize keeping what is on screen (issue #19).
+	hasHandlers := len(a.resizeHandlers) > 0
+	if !hasHandlers {
+		copyWidth := oldWidth
+		if width < copyWidth {
+			copyWidth = width
+		}
+		copyHeight := oldHeight
+		if height < copyHeight {
+			copyHeight = height
+		}
+		for y := 0; y < copyHeight; y++ {
+			for x := 0; x < copyWidth; x++ {
+				sourceIndex := y*oldWidth + x
+				targetIndex := y*width + x
+				a.back.cells[targetIndex] = oldBack.cells[sourceIndex]
+				if sourceIndex < len(oldLines) {
+					a.lines[targetIndex] = oldLines[sourceIndex]
+				}
 			}
 		}
 	}
@@ -556,7 +953,9 @@ func (a *App) resize(width int, height int) {
 	for _, handler := range a.resizeHandlers {
 		handler(event)
 	}
-	_ = a.Apply()
+	if !hasHandlers {
+		_ = a.Apply()
+	}
 }
 
 type inputParser struct {
@@ -649,11 +1048,15 @@ func parseEscape(data []byte) (any, int, bool) {
 		return nil, 0, false
 	}
 	if data[1] == 'O' {
-		event := parseSS3(data)
-		if event == nil {
+		// Distinguish "incomplete" from "unrecognized": only ask for more bytes when
+		// fewer than 3 are present. Once 3 are buffered we always consume them, even
+		// if parseSS3 doesn't recognize the final byte (it returns a nil event).
+		// Otherwise a stray SS3 such as ESC O P (F1) would never be consumed and
+		// would wedge the parser behind it (issue #8).
+		if len(data) < 3 {
 			return nil, 0, false
 		}
-		return event, 3, true
+		return parseSS3(data), 3, true
 	}
 	if data[1] != '[' {
 		if utf8.FullRune(data[1:]) {
@@ -724,8 +1127,12 @@ func parseCSI(params string, final byte) any {
 	case 'u':
 		keyCode, mod := parseCSIParams(params)
 		shift, alt, ctrl := decodeCSIModifier(mod)
-		if keyCode == 13 {
-			return TypeEvent{Key: KeyEnter, Shift: shift, Alt: alt, Ctrl: ctrl}
+		// Terminals in Kitty / modifyOtherKeys mode encode many keys as CSI-u. Map
+		// the standard special codepoints (and Kitty's functional-key range) before
+		// falling back to a literal rune; otherwise Tab/Backspace/Esc and the
+		// function keys silently vanish or arrive as wrong runes (issue #12).
+		if key, ok := csiUSpecialKey(keyCode); ok {
+			return TypeEvent{Key: key, Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
 		// Modified printable keys (e.g. Ctrl+Shift+C) arrive as CSI-u when the
 		// terminal reports them; surface them as rune events.
@@ -748,6 +1155,32 @@ func parseCSI(params string, final byte) any {
 			return TypeEvent{Key: KeyPageUp, Shift: shift, Alt: alt, Ctrl: ctrl}
 		case 6:
 			return TypeEvent{Key: KeyPageDown, Shift: shift, Alt: alt, Ctrl: ctrl}
+		// Function keys in the CSI-tilde encoding: F1–F4 as 11–14 (older terminals)
+		// and F5–F12 as 15/17–21/23/24.
+		case 11:
+			return TypeEvent{Key: KeyF1, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 12:
+			return TypeEvent{Key: KeyF2, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 13:
+			return TypeEvent{Key: KeyF3, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 14:
+			return TypeEvent{Key: KeyF4, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 15:
+			return TypeEvent{Key: KeyF5, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 17:
+			return TypeEvent{Key: KeyF6, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 18:
+			return TypeEvent{Key: KeyF7, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 19:
+			return TypeEvent{Key: KeyF8, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 20:
+			return TypeEvent{Key: KeyF9, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 21:
+			return TypeEvent{Key: KeyF10, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 23:
+			return TypeEvent{Key: KeyF11, Shift: shift, Alt: alt, Ctrl: ctrl}
+		case 24:
+			return TypeEvent{Key: KeyF12, Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
 	case 'M', 'm':
 		return parseMouse(params, final)
@@ -772,8 +1205,40 @@ func parseSS3(data []byte) any {
 		return TypeEvent{Key: KeyHome}
 	case 'F':
 		return TypeEvent{Key: KeyEnd}
+	// Many terminals emit F1–F4 as SS3 P/Q/R/S and keypad Enter as SS3 M.
+	case 'P':
+		return TypeEvent{Key: KeyF1}
+	case 'Q':
+		return TypeEvent{Key: KeyF2}
+	case 'R':
+		return TypeEvent{Key: KeyF3}
+	case 'S':
+		return TypeEvent{Key: KeyF4}
+	case 'M':
+		return TypeEvent{Key: KeyEnter}
 	}
 	return nil
+}
+
+// csiUSpecialKey maps a CSI-u codepoint to a KeyCode for the keys that are not
+// plain printable runes: the C0 control codepoints (Tab/Enter/Esc/Backspace) and
+// the Kitty keyboard-protocol functional-key range (F1–F12 at 57364–57375).
+func csiUSpecialKey(code int) (KeyCode, bool) {
+	switch code {
+	case 9:
+		return KeyTab, true
+	case 13:
+		return KeyEnter, true
+	case 27:
+		return KeyEscape, true
+	case 127:
+		return KeyBackspace, true
+	}
+	// Kitty functional keys: F1 = 57364 (0xE004) … F12 = 57375.
+	if code >= 57364 && code <= 57375 {
+		return KeyF1 + KeyCode(code-57364), true
+	}
+	return KeyUnknown, false
 }
 
 func parseCSIModifiers(params string) (bool, bool, bool) {
@@ -841,6 +1306,11 @@ func parseMouse(params string, final byte) any {
 	}
 	x := cx - 1
 	y := cy - 1
+	// SGR-encoded modifier and motion bits (shared by clicks and wheel).
+	shift := cb&4 != 0
+	alt := cb&8 != 0
+	ctrl := cb&16 != 0
+	motion := cb&32 != 0
 	if cb&64 != 0 {
 		delta := -1
 		if cb&1 == 0 {
@@ -859,11 +1329,22 @@ func parseMouse(params string, final byte) any {
 	case 3:
 		button = MouseLeft
 	}
-	down := final == 'M' && (cb&3) != 3
+	noButton := (cb & 3) == 3
+	// Down stays true for the motion ("drag") reports the terminal sends while a
+	// button is held, so existing drag-aware widgets keep working; Drag/Move let
+	// new code tell a fresh press, a drag, and a button-less move apart (issue #11).
+	down := final == 'M' && !noButton
+	drag := down && motion
+	move := motion && noButton
 	return ClickEvent{
 		X:      x,
 		Y:      y,
 		Button: button,
 		Down:   down,
+		Drag:   drag,
+		Move:   move,
+		Shift:  shift,
+		Alt:    alt,
+		Ctrl:   ctrl,
 	}
 }

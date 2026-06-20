@@ -1,14 +1,54 @@
 package tv
 
-import tui "github.com/hobbestherat/turbotui"
+import (
+	"unicode"
 
-// inputColors picks the foreground/background pair for an input widget based on
-// whether it currently has focus.
-func inputColors(focused bool, fg tui.Color, bg tui.Color, focusFG tui.Color, focusBG tui.Color) (tui.Color, tui.Color) {
+	tui "github.com/hobbestherat/turbotui"
+)
+
+// focusColors picks the foreground/background pair for a widget based on whether
+// it currently has focus. It is shared by every input (TextBox/Select/Checkbox/
+// MultiLineInput) and by non-input widgets that still swap colours on focus
+// (Button), so the focus-colour pattern is spelled one way everywhere.
+func focusColors(focused bool, fg tui.Color, bg tui.Color, focusFG tui.Color, focusBG tui.Color) (tui.Color, tui.Color) {
 	if focused {
 		return focusFG, focusBG
 	}
 	return fg, bg
+}
+
+// drawMnemonicClipped writes label (with the '&' mnemonic marker removed) at
+// (x, y), truncating it to maxWidth terminal columns with a trailing "…" when it
+// overflows, and underlines the mnemonic hot character in hotFG when highlight is
+// true and it survived truncation. It returns the display width actually drawn.
+//
+// Unlike drawMnemonic (which never truncates), this is for widgets whose label
+// must stay inside a fixed width — Button captions and Checkbox labels — so a long
+// label shows an ellipsis instead of bleeding into a neighbour or being silently
+// clipped by the surface.
+func drawMnemonicClipped(surface Surface, x int, y int, label string, maxWidth int, style tui.Cell, highlight bool, hotFG tui.Color) int {
+	clean, hot := parseMnemonic(label)
+	if maxWidth <= 0 {
+		return 0
+	}
+	text := clean
+	cleanRunes := []rune(clean)
+	prefixRunes := len(cleanRunes) // how many clean runes are shown before any ellipsis
+	if tui.StringWidth(clean) > maxWidth {
+		text = Truncate(clean, maxWidth, "…")
+		// Truncate appended a single "…" rune, so the shown clean runes are the
+		// truncated text minus that one rune.
+		prefixRunes = len([]rune(text)) - len([]rune("…"))
+		if prefixRunes < 0 {
+			prefixRunes = 0
+		}
+	}
+	surface.WriteString(x, y, text, style)
+	if highlight && hot >= 0 && hot < prefixRunes {
+		col := x + tui.StringWidth(string(cleanRunes[:hot]))
+		surface.SetCell(col, y, tui.Cell{Ch: cleanRunes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+	}
+	return tui.StringWidth(text)
 }
 
 // parseMnemonic strips the '&' mnemonic marker from a label and returns the clean
@@ -57,12 +97,16 @@ func drawMnemonic(surface Surface, x int, y int, label string, style tui.Cell, h
 	if hot >= len(runes) {
 		return
 	}
-	surface.SetCell(x+hot, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+	// hot is a rune index, but the highlight must land on a column: sum the
+	// display width of everything before it so a leading double-width (CJK) or
+	// combining rune doesn't shift the highlight onto the wrong cell.
+	col := x + tui.StringWidth(string(runes[:hot]))
+	surface.SetCell(col, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
 }
 
+// unicodeLower folds a rune to lower case for mnemonic matching. It uses
+// unicode.ToLower so capitals whose lowercase differs in code point (e.g. 'İ',
+// 'ẞ', accented Latin) round-trip correctly, not just ASCII A-Z.
 func unicodeLower(value rune) rune {
-	if value >= 'A' && value <= 'Z' {
-		return value - 'A' + 'a'
-	}
-	return value
+	return unicode.ToLower(value)
 }

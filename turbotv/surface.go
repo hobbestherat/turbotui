@@ -1,7 +1,18 @@
 package tv
 
-import tui "github.com/hobbestherat/turbotui"
+import (
+	"strings"
 
+	tui "github.com/hobbestherat/turbotui"
+)
+
+// Surface is the clipped drawing target handed to a component's DrawFn. It wraps
+// the App's cell buffer together with a clip rectangle, so every write
+// (SetCell, WriteString, Fill, DrawBox, DrawShadow) is confined to the
+// component's area and can never overdraw a sibling. WithClip narrows the clip
+// for a child region; the framework already passes each component a surface
+// clipped to its bounds. A Surface is a small value, cheap to copy and pass by
+// value.
 type Surface struct {
 	app  *tui.App
 	clip Rect
@@ -37,15 +48,84 @@ func (s Surface) SetCell(x int, y int, cell tui.Cell) {
 	s.app.WriteCell(x, y, cell)
 }
 
+// WriteString draws text at (x,y), clipped to the surface's clip rect. It is
+// display-width aware: double-width glyphs advance two columns, combining marks
+// fold into the preceding glyph, and a wide glyph that would straddle the clip
+// edge is replaced by a blank so neighbouring widgets are never overdrawn.
 func (s Surface) WriteString(x int, y int, text string, style tui.Cell) {
 	column := x
+	lastBase := -1
 	for _, ch := range text {
-		if s.clip.Contains(column, y) {
-			style.Ch = ch
-			s.app.WriteCell(column, y, style)
+		width := tui.RuneWidth(ch)
+		if width == 0 {
+			if lastBase >= 0 && s.clip.Contains(lastBase, y) {
+				base := s.app.ReadCell(lastBase, y)
+				base.Combining += string(ch)
+				s.app.WriteCell(lastBase, y, base)
+			}
+			continue
 		}
-		column++
+		cell := style
+		cell.Combining = ""
+		switch {
+		case width >= 2 && s.clip.Contains(column, y) && s.clip.Contains(column+1, y):
+			cell.Ch = ch
+			s.app.WriteCell(column, y, cell)
+			lastBase = column
+		case width >= 2 && s.clip.Contains(column, y):
+			// The wide glyph straddles the clip boundary; blank the visible half.
+			cell.Ch = ' '
+			s.app.WriteCell(column, y, cell)
+			lastBase = -1
+		case width == 1 && s.clip.Contains(column, y):
+			cell.Ch = ch
+			s.app.WriteCell(column, y, cell)
+			lastBase = column
+		default:
+			lastBase = -1
+		}
+		column += width
 	}
+}
+
+// WriteStringClipped draws text but never beyond maxWidth terminal columns
+// (in addition to the surface clip), cutting on a glyph boundary so a
+// double-width character is never split. For an ellipsis on overflow, pass the
+// result of Truncate to WriteString instead.
+func (s Surface) WriteStringClipped(x int, y int, maxWidth int, text string, style tui.Cell) {
+	if maxWidth <= 0 {
+		return
+	}
+	s.WriteString(x, y, Truncate(text, maxWidth, ""), style)
+}
+
+// Truncate shortens text so it occupies at most maxWidth terminal columns,
+// appending ellipsis when it had to cut. It is width-aware and never splits a
+// double-width glyph across the boundary; combining marks stay with their base.
+func Truncate(text string, maxWidth int, ellipsis string) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if tui.StringWidth(text) <= maxWidth {
+		return text
+	}
+	ellipsisWidth := tui.StringWidth(ellipsis)
+	if ellipsisWidth > maxWidth {
+		ellipsis = ""
+		ellipsisWidth = 0
+	}
+	budget := maxWidth - ellipsisWidth
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		w := tui.RuneWidth(r)
+		if used+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String() + ellipsis
 }
 
 func (s Surface) Fill(rect Rect, cell tui.Cell) {
@@ -81,12 +161,57 @@ func (s Surface) DrawBox(rect Rect, line tui.LineKind, fg tui.Color, bg tui.Colo
 	s.SetCell(right, bottom, tui.Cell{Ch: chars.BottomRight, FG: fg, BG: bg, Bold: true})
 }
 
-func (s Surface) DrawShadow(rect Rect, color tui.Color) {
-	for y := rect.Y + 1; y <= rect.Bottom()+1; y++ {
-		s.drawShadowCell(rect.Right()+1, y, color)
+// ShadowStyle controls drop-shadow geometry: how far the shadow's corner notch
+// is offset from the element's top-left-lit edges and how thick its right and
+// bottom bands are. The default (DefaultShadowStyle) follows the classic
+// Turbo-Vision proportion — a 2-column right band balancing a 1-row bottom band
+// — so the shadow hugs the frame and still reads as balanced despite the ~2:1
+// tall:wide terminal cell aspect ratio. Override DefaultShadowStyle before
+// building the UI, or set a widget's ShadowStyle field, to adjust it.
+type ShadowStyle struct {
+	// OffsetX, OffsetY set the corner notch: the right band starts OffsetY rows
+	// below the element's top edge and the bottom band starts OffsetX columns to
+	// the right of its left edge, so the top-left corner reads as lit. 1 is the
+	// snug classic value; larger values open the notch wider.
+	OffsetX int
+	OffsetY int
+	// RightWidth, BottomHeight are the band thicknesses in cells. The bands always
+	// hug the frame (their near edge is the cell immediately past the element), so
+	// these control how heavy the shadow looks, not how detached it is.
+	RightWidth   int
+	BottomHeight int
+}
+
+// DefaultShadowStyle is the geometry new widgets seed their ShadowStyle from. The
+// 2:1 right:bottom proportion compensates for the terminal cell aspect ratio so
+// the L-shaped shadow looks balanced and snug.
+var DefaultShadowStyle = ShadowStyle{
+	OffsetX:      1,
+	OffsetY:      1,
+	RightWidth:   2,
+	BottomHeight: 1,
+}
+
+// DrawShadow paints an L-shaped drop shadow hugging the element's right and
+// bottom edges. The bands always start at the cell immediately past the element
+// (so the shadow never reads as detached); style controls their thickness and
+// the top-left corner notch. A zero-thickness band is simply omitted.
+func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
+	right := rect.Right()
+	bottom := rect.Bottom()
+	// Right band: a vertical strip RightWidth columns wide just past the right
+	// edge, started OffsetY rows down so the lit corner stays open.
+	for dx := 1; dx <= style.RightWidth; dx++ {
+		for y := rect.Y + style.OffsetY; y <= bottom+style.BottomHeight; y++ {
+			s.drawShadowCell(right+dx, y, color)
+		}
 	}
-	for x := rect.X + 1; x <= rect.Right()+1; x++ {
-		s.drawShadowCell(x, rect.Bottom()+1, color)
+	// Bottom band: a horizontal strip BottomHeight rows tall just past the bottom
+	// edge, started OffsetX columns in from the left for the same reason.
+	for dy := 1; dy <= style.BottomHeight; dy++ {
+		for x := rect.X + style.OffsetX; x <= right+style.RightWidth; x++ {
+			s.drawShadowCell(x, bottom+dy, color)
+		}
 	}
 }
 

@@ -24,7 +24,10 @@ Desktop                       owns the screen, the menu bar and a stack of layer
 
 - A **`Desktop`** wraps a `*tui.App`, composes all layers each frame, routes
   input, and manages focus. Create it with `tv.NewDesktop(app)` and run it with
-  `desktop.Run(ctx)`.
+  `desktop.Run(ctx)`. On a terminal resize it clamps every window back into view
+  and invokes `Desktop.OnResize` and each `Layer.OnResize` hook — use those
+  rather than reaching into `app.OnResize`. The desktop is single-threaded:
+  mutate it on the event loop, or from a background goroutine via `Desktop.Post`.
 - A **`Layer`** is one entry in the z-stack. Helpers: `tv.NewFullscreenLayer`
   (background), `tv.NewWindowLayer` (normal window — menu shortcuts from below
   stay live), `tv.NewModalLayer` (dialog — captures all input while on top).
@@ -70,20 +73,26 @@ func main() {
 
 | Widget               | Constructor                                            | Notes |
 |----------------------|--------------------------------------------------------|-------|
-| `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`, draggable, close button |
-| `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate |
-| `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget |
-| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter |
+| `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`/`Close()`, draggable, close/`Minimizable`/`Maximizable`/`Resizable` buttons; drag/resize/maximize clamped to the desktop work area (or `ConstrainTo`) |
+| `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate; long captions are ellipsised and never bleed past the button |
+| `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget; word-wraps across its rows (`Wrap`, on by default) instead of clipping |
+| `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter; Ctrl+A/arrow/Backspace editing (see below) |
 | `MultiLineInput`     | `NewMultiLineInput(text, bounds)`                      | Multi-line editor; `GetText`; optional `OnSubmit` + `SubmitMode` |
 | `TextView`           | `NewTextView(text, bounds)`                            | Read-only, mouse-wheel scrollable; `SetText` |
 | `Select`             | `NewSelect(desktop, options, bounds)`                  | Drop-down combo; `Value`, `GetSelected`, `SetSelected`, `OnChange` |
 | `Checkbox`           | `NewCheckbox(label, bounds, onToggle)`                 | On/off toggle; `IsChecked`/`SetChecked`; Space/Enter/click |
 | `Tree`               | `NewTree(bounds)`                                      | Collapsible, scrollable tree; `AddRoot`, `Selected`, `OnSelect`/`OnActivate` |
 | `MenuBar`            | `NewMenuBar(bounds, menus...)`                         | See below |
-| `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers |
+| `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers; **Esc** closes it by default |
 
 All input widgets are focusable; `Tab`/`Shift+Tab` and arrow keys move focus
-within the top layer. State is read and written with explicit methods
+within the top layer. `Tab` follows reading order (top-to-bottom, then
+left-to-right) regardless of the order widgets were added; set
+`VisualComponent.TabIndex` to override it. Arrow keys pick the nearest widget
+that actually lies in the pressed direction. A modal layer
+(`tv.NewModalLayer`) captures all input while on top — clicks outside its
+bounds never fall through to lower windows, and a modal `Layer.OnClickOutside`
+hook fires instead. State is read and written with explicit methods
 (`GetText()`/`SetText()`, `Value()`/`SetSelected()`) rather than reflection or
 data binding.
 
@@ -96,6 +105,12 @@ For action-style forms, inputs can submit directly:
   - `MultiLineSubmitOnCtrlEnter`: Ctrl+Enter = submit, Enter = newline
 - When `OnSubmit` is not set on `MultiLineInput`, Enter and Shift+Enter both insert new lines.
 
+`MultiLineInput` reserves its rightmost column for a vertical scrollbar (shared
+with `TextView`/tree/dropdown) that appears when the wrapped content overflows the
+box; its arrows, track and thumb are all clickable and the thumb is draggable. By
+default long logical lines wrap at the character level (good for code); set
+`MultiLineInput.WordWrap = true` to wrap on whitespace so words stay intact.
+
 ### Clipboard paste
 
 Bracketed paste (terminal mode `?2004`) is enabled automatically. Pasted text
@@ -104,7 +119,7 @@ and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
 `MultiLineInput` keeps them. To handle paste in a custom widget, set
 `Component.OnPasteFn` (or call `app.OnPaste(...)` at the engine level).
 
-### Selection and copy
+### Selection, copy and cut
 
 `TextBox` and `MultiLineInput` support text selection:
 
@@ -113,13 +128,19 @@ and never triggers an `OnSubmit`. `TextBox` strips newlines (it is single-line);
 - Typing, **Backspace** or **Delete** replaces/removes the selection.
 - **Ctrl+C** (and **Ctrl+Shift+C** where the terminal forwards it) copies the
   selection to the system clipboard.
+- **Ctrl+X** cuts the selection (deletes it and copies it to the clipboard), in
+  `TextBox`. With nothing selected it does nothing and the keystroke falls through.
+
+`TextBox` also has the usual editing shortcuts: **Ctrl+A** selects all,
+**Ctrl+Left/Right** jump a word (hold **Shift** to extend the selection), and
+**Ctrl+Backspace** / **Ctrl+Delete** delete a word.
 
 A focused `TextView` has no caret, so **Ctrl+C copies its entire content**
 (`TextView.AllText()`), including the children of folded entries — handy for
 grabbing a whole chat/log pane.
 
-Ctrl+C only copies when there is something to copy; otherwise it is left for the
-app (e.g. a quit confirmation) via `Desktop.SetUnhandledKeyFn`.
+Ctrl+C/Ctrl+X only act when there is something to copy/cut; otherwise they are
+left for the app (e.g. a quit confirmation) via `Desktop.SetUnhandledKeyFn`.
 
 Copy is written with **OSC 52** (reaches the clipboard through most terminals
 and over SSH) plus a best-effort native fallback (`pbcopy` / `wl-copy` /
@@ -140,9 +161,12 @@ window.AddContent(region)
 ```
 
 The list opens on a desktop-owned popup layer, so it is **never clipped** by the
-window that hosts it. Keyboard: `Enter`/`Space` open, `↑`/`↓` move, `Enter`
-pick, `Esc` cancel. Mouse: click to open, click an item to pick, click outside to
-dismiss.
+window that hosts it. It widens to fit the longest option and flips above the
+control when there is no room below. Keyboard: `Enter`/`Space` open, `↑`/`↓`
+move, `Home`/`End` jump to the ends, `PgUp`/`PgDn` page, typing a letter jumps
+(type-ahead) to the next option beginning with it, `Enter` pick, `Esc` cancel.
+Mouse: click to open, click an item to pick, click or drag the scrollbar to
+scroll, wheel to scroll, click outside to dismiss.
 
 ## Menus, mnemonics and accelerators
 
@@ -186,14 +210,56 @@ tv.ShowConfirmYesNo(desktop, "Confirm", "Apply values?", func(yes bool) {
 })
 ```
 
-`ShowConfirmYesNo` pushes a modal layer and returns it. For custom dialogs build
-a `tv.NewDialog(...)`, add widgets, and push it with `tv.NewModalLayer(...)`.
+`ShowConfirmYesNo` is sized to its message: the width fits the longer of the
+wrapped message and the button row, the height fits the wrapped line count, and
+both are capped to the screen (so the footer never crowds, overlaps, or clips at
+any size). The buttons carry `&Yes`/`&No` mnemonics with **Enter**→Yes (default)
+and **Esc**→No (cancel). It pushes a modal layer and returns it.
+
+For custom dialogs build a `tv.NewDialog(...)`, add widgets, and push it with
+`tv.NewModalLayer(...)`. Lay a footer out with `tv.NewButtonRow(rowY, interiorW,
+align, gap, buttons...)`, which sizes each button to its label, separates them by
+`gap`, and start/center/end-aligns the group within the content width — no magic
+offsets. Mark a button `Default`/`Cancel` and call
+`dialog.SetDefaultCancelButtons(buttons...)` so **Enter** activates the default
+and **Esc** the cancel whenever the focused widget does not consume the key.
+
+A dialog (or window) added through a layer gets a back-reference to its desktop,
+so `dialog.Window.Close()` removes the layer and fires `OnClose` in one call, and
+a generic dialog closes on **Esc** by default (replace `Root().OnTypeFn` to change
+that). The title-bar **[■]** close button self-dismisses (removes the window's
+layer) when no `OnClose` is set; wire `OnClose` to take full control of teardown
+(e.g. a confirmation step).
+
+### Window placement constraints
+
+Drag, resize and maximize are clamped to the desktop **work area** — by default the
+whole screen minus the menu-bar row, so a title bar can never hide under the menu
+bar or off the left edge. Reserve a region (e.g. a pinned sidebar) with
+`desktop.SetWorkArea(rect)` so windows keep clear of everything outside `rect`, or
+bound a single window with `window.ConstrainTo = &rect`. Set `window.Maximizable`
+to add a `[▢]`/`[▣]` title-bar button (and use `Maximize()`/`Restore()` /
+`OnMaximize` from code); maximizing fills the work area.
 
 ## Theming
 
-`desktop.SetTheme(theme)` accepts a `tv.Theme` (start from `tv.DefaultTheme` and
-override fields). It controls window/desktop/button/input/dialog colours, the
-mnemonic highlight colour, button focus colours, and more.
+`desktop.SetTheme(theme)` (or the package-level `tv.SetTheme(theme)`) accepts a
+`tv.Theme` (start from `tv.DefaultTheme` and override fields). It controls
+window/desktop/button/input/dialog colours, the mnemonic highlight colours, menu
+chrome (`MenuBar*`/`MenuHot*`/`MenuSelect*`/`MenuShadow`), button focus colours,
+and more. Call it **before** building the UI so every widget seeds from it; chrome
+resolved at draw time (desktop background, menus, dropdown popups, selections)
+reflects a swap immediately. `tv.ActiveTheme()` returns the current palette.
+
+`tv.HighContrastTheme` is a built-in black/white, colour-blind-safe preset.
+
+### Colour capability & NO_COLOR
+
+The renderer detects the terminal's colour support at startup
+(`tui.DetectColorLevel`, from `COLORTERM`/`TERM`) and downsamples truecolor/256
+themes to what the terminal can show. The [`NO_COLOR`](https://no-color.org/)
+convention is honoured: when `NO_COLOR` is set to a non-empty value (or `TERM` is
+`dumb`) all colour is suppressed. Force a level with `tui.SetColorLevel(...)`.
 
 ## Building your own widget
 

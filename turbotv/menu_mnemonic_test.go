@@ -44,7 +44,7 @@ func TestAltMnemonicFocusesLabelTarget(t *testing.T) {
 	desktop.compose()
 
 	desktop.handleType(altRune('n'))
-	if !field.Component.HasFocus {
+	if !field.Component.Focused() {
 		t.Fatalf("expected Alt+n to focus the labelled field")
 	}
 }

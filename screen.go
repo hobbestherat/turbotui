@@ -1,5 +1,8 @@
 package tui
 
+// screen is one fixed-size grid of cells: the App keeps two of them (a front
+// buffer holding what is currently on the terminal and a back buffer being drawn
+// into) so Apply can diff them and emit only the cells that changed.
 type screen struct {
 	width  int
 	height int
