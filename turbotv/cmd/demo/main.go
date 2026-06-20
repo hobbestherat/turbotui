@@ -192,22 +192,22 @@ func buildTreeWindow(desktop *tv.Desktop) {
 }
 
 func focusName(a *tv.TextBox, b *tv.TextBox, m *tv.MultiLineInput, v *tv.TextView, button *tv.Button, region *tv.Select) string {
-	if a.Component.HasFocus {
+	if a.Component.Focused() {
 		return "name"
 	}
-	if b.Component.HasFocus {
+	if b.Component.Focused() {
 		return "city"
 	}
-	if m.Component.HasFocus {
+	if m.Component.Focused() {
 		return "notes"
 	}
-	if v.Component.HasFocus {
+	if v.Component.Focused() {
 		return "textview"
 	}
-	if button.Component.HasFocus {
+	if button.Component.Focused() {
 		return "confirm"
 	}
-	if region.Component.HasFocus {
+	if region.Component.Focused() {
 		return "region"
 	}
 	return "-"

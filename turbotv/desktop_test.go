@@ -29,18 +29,18 @@ func TestTabFocusStaysInTopLayer(t *testing.T) {
 	desktop.AddLayer(NewLayer("top", topRoot, true, false))
 
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyTab})
-	if !topA.HasFocus {
+	if !topA.Focused() {
 		t.Fatalf("expected top layer first focusable to receive focus")
 	}
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyTab})
-	if !topB.HasFocus {
+	if !topB.Focused() {
 		t.Fatalf("expected top layer second focusable to receive focus")
 	}
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyTab})
-	if !topA.HasFocus {
+	if !topA.Focused() {
 		t.Fatalf("expected focus cycle to stay in top layer")
 	}
-	if baseA.HasFocus {
+	if baseA.Focused() {
 		t.Fatalf("expected base layer focusable to stay unfocused")
 	}
 }
@@ -119,11 +119,11 @@ func TestFocusedTextBoxConsumesArrowKeys(t *testing.T) {
 	desktop.AddLayer(NewLayer("top", root, true, false))
 
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyTab})
-	if !first.Component.HasFocus {
+	if !first.Component.Focused() {
 		t.Fatalf("expected first textbox to be focused")
 	}
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyRight})
-	if !first.Component.HasFocus {
+	if !first.Component.Focused() {
 		t.Fatalf("expected focus to stay in first textbox for cursor move")
 	}
 }
@@ -157,10 +157,10 @@ func TestClickRaisesLowerWindowAndFocusesIt(t *testing.T) {
 	if desktop.TopLayer() != layerA {
 		t.Fatalf("expected clicked window A to be raised to the top of the stack")
 	}
-	if !inputA.HasFocus {
+	if !inputA.Focused() {
 		t.Fatalf("expected clicking window A to move keyboard focus into it")
 	}
-	if inputB.HasFocus {
+	if inputB.Focused() {
 		t.Fatalf("expected window B to lose focus when A is clicked")
 	}
 }

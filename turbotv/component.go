@@ -22,15 +22,23 @@ type Widget interface {
 }
 
 // VisualComponent is the retained-mode node shared by every tv widget: a bounds
-// rectangle, visibility/enabled/focus flags, parent/children links and the
+// rectangle, visibility/enabled flags, parent/children links, focus state and the
 // draw/layout/input callbacks. Its zero value is invisible and inert (Visible
 // and Enabled are false), so always construct one with NewComponent.
+//
+// Framework-owned state — the parent/children tree links and focus — is private:
+// read it through Parent(), Children() and Focused(), and let the desktop drive
+// focus. App-owned state (Visible, Enabled, Focusable, Bounds, …) stays public.
+//
+// A component dispatches input through its On*Fn callback fields, but it also
+// satisfies the capability interfaces (Painter, Typer, Clicker, …): a widget can
+// implement those interfaces and call Bind to wire them in, getting a
+// compile-time-checked contract instead of hand-assigning function fields.
 type VisualComponent struct {
 	Bounds      Rect
 	Visible     bool
 	Enabled     bool
 	Focusable   bool
-	HasFocus    bool
 	DrawOutside bool
 	// TabIndex orders keyboard focus traversal (Tab / Shift+Tab). Components are
 	// visited in ascending TabIndex; ties fall back to on-screen reading order
@@ -42,9 +50,6 @@ type VisualComponent struct {
 	// space along their packing axis. Zero (the default) means the child keeps its
 	// natural Bounds size.
 	Flex int
-
-	Parent   *VisualComponent
-	Children []*VisualComponent
 
 	DrawFn      DrawFn
 	LayoutFn    LayoutFn
@@ -82,6 +87,18 @@ type VisualComponent struct {
 
 	mnemonicActive bool
 
+	// parent/children are the framework-owned tree links. They are private so a
+	// caller cannot reseat a node or splice the tree behind the desktop's back and
+	// break focus traversal, hit-testing or absolute-bounds caching; mutate them
+	// only through AddChild/RemoveChild and read them through Parent()/Children().
+	parent   *VisualComponent
+	children []*VisualComponent
+
+	// hasFocus is framework-owned focus state. It is private and driven solely by
+	// Desktop.setFocus so the invariant "at most one component has focus" cannot be
+	// violated by a stray field write; read it through Focused().
+	hasFocus bool
+
 	// abs is the cached AbsoluteBounds() result and absCached marks it valid. It is
 	// recomputed lazily (and cached) on the first call after a bounds/parent
 	// change, so repeated calls within a frame are O(1) instead of O(depth).
@@ -108,6 +125,42 @@ func (c *VisualComponent) Root() *VisualComponent {
 	return c
 }
 
+// Focused reports whether the desktop currently routes the keyboard to this
+// component. It is the read-only view of the framework-owned focus flag; focus is
+// moved with Desktop.SetFocus, never by writing a field.
+func (c *VisualComponent) Focused() bool {
+	return c.hasFocus
+}
+
+// Parent returns the component's parent in the layer tree, or nil for a root. The
+// link is read-only: reparent with the parent's AddChild/RemoveChild so the
+// absolute-bounds cache and focus traversal stay consistent.
+func (c *VisualComponent) Parent() *VisualComponent {
+	return c.parent
+}
+
+// Children returns a copy of the component's child slice. It is a snapshot, so
+// mutating the returned slice does not alter the tree; add or remove children with
+// AddChild/RemoveChild.
+func (c *VisualComponent) Children() []*VisualComponent {
+	out := make([]*VisualComponent, len(c.children))
+	copy(out, c.children)
+	return out
+}
+
+// SetVisible shows or hides the component (and, with it, its subtree). It is the
+// named setter counterpart to the public Visible field for callers that prefer a
+// method-based API.
+func (c *VisualComponent) SetVisible(visible bool) {
+	c.Visible = visible
+}
+
+// SetEnabled enables or disables the component. A disabled component is skipped by
+// hit-testing, focus traversal and input bubbling.
+func (c *VisualComponent) SetEnabled(enabled bool) {
+	c.Enabled = enabled
+}
+
 func (c *VisualComponent) SetBounds(bounds Rect) {
 	c.Bounds = bounds
 	c.invalidateAbs()
@@ -118,23 +171,23 @@ func (c *VisualComponent) SetBounds(bounds Rect) {
 
 func (c *VisualComponent) AddChild(child Widget) {
 	root := child.Root()
-	root.Parent = c
+	root.parent = c
 	root.invalidateAbs()
-	c.Children = append(c.Children, root)
+	c.children = append(c.children, root)
 }
 
 func (c *VisualComponent) RemoveChild(child Widget) {
 	root := child.Root()
-	next := make([]*VisualComponent, 0, len(c.Children))
-	for _, existing := range c.Children {
+	next := make([]*VisualComponent, 0, len(c.children))
+	for _, existing := range c.children {
 		if existing == root {
-			existing.Parent = nil
+			existing.parent = nil
 			existing.invalidateAbs()
 			continue
 		}
 		next = append(next, existing)
 	}
-	c.Children = next
+	c.children = next
 }
 
 // invalidateAbs marks this component's cached absolute bounds — and, since a
@@ -143,7 +196,7 @@ func (c *VisualComponent) RemoveChild(child Widget) {
 // automatically on SetBounds/AddChild/RemoveChild.
 func (c *VisualComponent) invalidateAbs() {
 	c.absCached = false
-	for _, child := range c.Children {
+	for _, child := range c.children {
 		child.invalidateAbs()
 	}
 }
@@ -157,10 +210,10 @@ func (c *VisualComponent) AbsoluteBounds() Rect {
 	if c.absCached {
 		return c.abs
 	}
-	if c.Parent == nil {
+	if c.parent == nil {
 		c.abs = c.Bounds
 	} else {
-		parent := c.Parent.AbsoluteBounds()
+		parent := c.parent.AbsoluteBounds()
 		c.abs = Rect{
 			X: parent.X + c.Bounds.X,
 			Y: parent.Y + c.Bounds.Y,
@@ -177,7 +230,7 @@ func (c *VisualComponent) AbsoluteBounds() Rect {
 // is therefore not visible-in-tree, so the desktop can stop routing keystrokes
 // and the hardware cursor to it.
 func (c *VisualComponent) visibleInTree() bool {
-	for current := c; current != nil; current = current.Parent {
+	for current := c; current != nil; current = current.parent {
 		if !current.Visible {
 			return false
 		}
@@ -204,10 +257,8 @@ func (c *VisualComponent) Draw(surface Surface) {
 	if c.UseBackground {
 		componentSurface.Fill(c.AbsoluteBounds(), c.Background)
 	}
-	if c.DrawFn != nil {
-		c.DrawFn(c, drawSurface)
-	}
-	for _, child := range c.Children {
+	c.Paint(drawSurface)
+	for _, child := range c.children {
 		child.Draw(componentSurface)
 	}
 }
@@ -216,15 +267,11 @@ func (c *VisualComponent) HitTestDeep(x int, y int) *VisualComponent {
 	if !c.Visible || !c.Enabled {
 		return nil
 	}
-	inside := c.AbsoluteBounds().Contains(x, y)
-	if c.OnHitTestFn != nil {
-		inside = c.OnHitTestFn(c, x, y)
-	}
-	if !inside {
+	if !c.HitTest(x, y) {
 		return nil
 	}
-	for index := len(c.Children) - 1; index >= 0; index-- {
-		target := c.Children[index].HitTestDeep(x, y)
+	for index := len(c.children) - 1; index >= 0; index-- {
+		target := c.children[index].HitTestDeep(x, y)
 		if target != nil {
 			return target
 		}
@@ -233,7 +280,7 @@ func (c *VisualComponent) HitTestDeep(x int, y int) *VisualComponent {
 }
 
 func (c *VisualComponent) bubble(handle func(*VisualComponent) bool) bool {
-	for current := c; current != nil; current = current.Parent {
+	for current := c; current != nil; current = current.parent {
 		if current.Enabled && handle(current) {
 			return true
 		}
@@ -241,27 +288,35 @@ func (c *VisualComponent) bubble(handle func(*VisualComponent) bool) bool {
 	return false
 }
 
+// The Bubble* dispatchers walk up the tree and offer the event to each ancestor
+// through its capability interface (Typer, Paster, Clicker, Scroller). A
+// *VisualComponent satisfies all of them, delegating to its On*Fn fields, so a
+// node that does not implement a capability simply declines the event.
 func (c *VisualComponent) BubbleType(event tui.TypeEvent) bool {
 	return c.bubble(func(v *VisualComponent) bool {
-		return v.OnTypeFn != nil && v.OnTypeFn(v, event)
+		t, ok := any(v).(Typer)
+		return ok && t.HandleType(event)
 	})
 }
 
 func (c *VisualComponent) BubblePaste(text string) bool {
 	return c.bubble(func(v *VisualComponent) bool {
-		return v.OnPasteFn != nil && v.OnPasteFn(v, text)
+		p, ok := any(v).(Paster)
+		return ok && p.HandlePaste(text)
 	})
 }
 
 func (c *VisualComponent) BubbleClick(event tui.ClickEvent) bool {
 	return c.bubble(func(v *VisualComponent) bool {
-		return v.OnClickFn != nil && v.OnClickFn(v, event)
+		cl, ok := any(v).(Clicker)
+		return ok && cl.HandleClick(event)
 	})
 }
 
 func (c *VisualComponent) BubbleScroll(event tui.ScrollEvent) bool {
 	return c.bubble(func(v *VisualComponent) bool {
-		return v.OnScrollFn != nil && v.OnScrollFn(v, event)
+		s, ok := any(v).(Scroller)
+		return ok && s.HandleScroll(event)
 	})
 }
 
@@ -272,7 +327,7 @@ func collectFocusable(root *VisualComponent, target *[]*VisualComponent) {
 	if root.Focusable {
 		*target = append(*target, root)
 	}
-	for _, child := range root.Children {
+	for _, child := range root.children {
 		collectFocusable(child, target)
 	}
 }

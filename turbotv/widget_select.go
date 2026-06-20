@@ -77,7 +77,7 @@ func (s *Select) IsOpen() bool {
 
 func (s *Select) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := focusColors(component.HasFocus, s.FG, s.BG, s.FocusFG, s.FocusBG)
+	fg, bg := focusColors(component.Focused(), s.FG, s.BG, s.FocusFG, s.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, style)
 	// Reserve the last column for the ▼/▲ marker and a one-column gap before it;

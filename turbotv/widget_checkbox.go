@@ -51,7 +51,7 @@ func (c *Checkbox) toggle() bool {
 }
 func (c *Checkbox) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := focusColors(component.HasFocus, c.FG, c.BG, c.FocusFG, c.FocusBG)
+	fg, bg := focusColors(component.Focused(), c.FG, c.BG, c.FocusFG, c.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	// Fill the whole bounds (not just the first row) so the focus highlight and
 	// the click hit area (handleClick toggles anywhere in abs) match what is drawn

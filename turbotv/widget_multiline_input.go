@@ -118,7 +118,7 @@ func (m *MultiLineInput) Clear() {
 
 func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := focusColors(component.HasFocus, m.FG, m.BG, m.FocusFG, m.FocusBG)
+	fg, bg := focusColors(component.Focused(), m.FG, m.BG, m.FocusFG, m.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 	// Reserve the right-hand column for the scrollbar, mirroring TextView, so the
@@ -161,7 +161,7 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 	// Only show the scrollbar when there is overflow; the reserved column is
 	// otherwise left blank.
 	if abs.W > 1 && len(rows) > abs.H {
-		m.drawScrollbar(surface, abs, component.HasFocus, len(rows), bg)
+		m.drawScrollbar(surface, abs, component.Focused(), len(rows), bg)
 	}
 }
 

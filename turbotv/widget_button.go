@@ -68,7 +68,7 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	if b.Shadow && !b.Pressed {
 		surface.DrawShadow(abs, b.ShadowColor)
 	}
-	fg, bg := focusColors(component.HasFocus, b.FG, b.BG, b.FocusFG, b.FocusBG)
+	fg, bg := focusColors(component.Focused(), b.FG, b.BG, b.FocusFG, b.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg, Bold: true}
 	faceSurface := surface.WithClip(face)
 	faceSurface.Fill(face, style)
@@ -76,7 +76,7 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	clean, _ := parseMnemonic(b.Label)
 	// Focused buttons are wrapped in chevrons so keyboard focus is obvious.
 	left, right := "[ ", " ]"
-	if component.HasFocus {
+	if component.Focused() {
 		left, right = "►", "◄"
 	}
 	leftW := tui.StringWidth(left)

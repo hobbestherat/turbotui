@@ -143,7 +143,7 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 			// A focused tree gets the bright selection bar; an unfocused one
 			// gets the dim variant so keyboard focus is never ambiguous when
 			// several lists share the screen.
-			if component.HasFocus {
+			if component.Focused() {
 				fg, bg = t.SelFG, t.SelBG
 			} else {
 				fg, bg = t.SelFGUnfocused, t.SelBGUnfocused
@@ -178,7 +178,7 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 	if needBar {
 		track := Rect{X: abs.X + abs.W - 1, Y: abs.Y, W: 1, H: abs.H}
 		drawVScrollbar(surface, track, len(rows), abs.H, t.offset,
-			activeTheme.WindowBorderFG, t.BG, component.HasFocus)
+			activeTheme.WindowBorderFG, t.BG, component.Focused())
 	}
 }
 

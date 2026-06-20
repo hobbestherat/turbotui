@@ -39,7 +39,7 @@ func TestModalSwallowsClickOutsideItsBounds(t *testing.T) {
 	if desktop.TopLayer() != modalLayer {
 		t.Fatalf("modal must stay on top; the background window was raised")
 	}
-	if input.HasFocus {
+	if input.Focused() {
 		t.Fatalf("a click outside the modal must not focus a background widget")
 	}
 	if outside != 1 {
@@ -50,7 +50,7 @@ func TestModalSwallowsClickOutsideItsBounds(t *testing.T) {
 	childAbs := modalChild.AbsoluteBounds()
 	desktop.handleClick(tui.ClickEvent{X: childAbs.X, Y: childAbs.Y, Button: tui.MouseLeft, Down: true})
 	desktop.handleClick(tui.ClickEvent{X: childAbs.X, Y: childAbs.Y, Button: tui.MouseLeft, Down: false})
-	if !modalChild.HasFocus {
+	if !modalChild.Focused() {
 		t.Fatalf("a click inside the modal must reach its children")
 	}
 	if outside != 1 {

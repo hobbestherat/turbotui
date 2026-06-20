@@ -114,7 +114,7 @@ func TestTextViewNoScrollbarWhenContentFits(t *testing.T) {
 	desktop, view := setupTextView(40, 10, Rect{X: 0, Y: 0, W: 20, H: 10})
 	view.Wrap = false
 	view.SetText("one\ntwo\nthree") // 3 rows in a 10-row pane
-	view.Component.HasFocus = true
+	view.Component.hasFocus = true
 
 	rows, textWidth, bar := view.metrics(view.Component.AbsoluteBounds())
 	if bar {
@@ -145,7 +145,7 @@ func TestTextViewScrollbarWhenContentOverflows(t *testing.T) {
 		lines = append(lines, "line")
 	}
 	view.SetText(strings.Join(lines, "\n"))
-	view.Component.HasFocus = true
+	view.Component.hasFocus = true
 
 	rows, textWidth, bar := view.metrics(view.Component.AbsoluteBounds())
 	if !bar {

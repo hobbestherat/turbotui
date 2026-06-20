@@ -40,7 +40,7 @@ func readRunes(app *tui.App, x, y, n int) string {
 func TestSelectEllipsizesLongValueWhenCollapsed(t *testing.T) {
 	long := "ThisIsAVeryLongModelNameThatDoesNotFit"
 	desktop, s := setupSelect(40, 5, []string{"short", long}, Rect{X: 0, Y: 0, W: 12, H: 1}, 1)
-	s.Component.HasFocus = true
+	s.Component.hasFocus = true
 	desktop.Redraw()
 	app := desktop.App()
 	// maxText = W-2 = 10, so the last text column is x=9 and must be the ellipsis.
@@ -53,7 +53,7 @@ func TestSelectEllipsizesLongValueWhenCollapsed(t *testing.T) {
 
 	// A short value must be shown in full with no ellipsis.
 	desktop2, s2 := setupSelect(40, 5, []string{"short", long}, Rect{X: 0, Y: 0, W: 12, H: 1}, 0)
-	s2.Component.HasFocus = true
+	s2.Component.hasFocus = true
 	desktop2.Redraw()
 	if got := desktop2.App().ReadCell(9, 0).Ch; got == '…' {
 		t.Fatalf("short value should not be ellipsized, got %q", got)

@@ -31,7 +31,7 @@ func leafTree(bounds Rect, labels ...string) *Tree {
 // colours.
 func TestTreeDrawSelectionBarFullWidth(t *testing.T) {
 	tree := leafTree(Rect{X: 0, Y: 0, W: 10, H: 5}, "alpha", "beta", "gamma")
-	tree.Component.HasFocus = true
+	tree.Component.hasFocus = true
 	app := drawTree(t, tree)
 
 	// Selected row (index 0): every column must carry the selection background
@@ -61,13 +61,13 @@ func TestTreeSelectionBarFocusDim(t *testing.T) {
 	}
 	tree := leafTree(Rect{X: 0, Y: 0, W: 8, H: 4}, "one", "two")
 
-	tree.Component.HasFocus = true
+	tree.Component.hasFocus = true
 	focused := drawTree(t, tree)
 	if got := focused.ReadCell(0, 0).BG; got != tree.SelBG {
 		t.Fatalf("focused selection BG = %+v, want SelBG %+v", got, tree.SelBG)
 	}
 
-	tree.Component.HasFocus = false
+	tree.Component.hasFocus = false
 	unfocused := drawTree(t, tree)
 	if got := unfocused.ReadCell(0, 0).BG; got != tree.SelBGUnfocused {
 		t.Fatalf("unfocused selection BG = %+v, want SelBGUnfocused %+v", got, tree.SelBGUnfocused)

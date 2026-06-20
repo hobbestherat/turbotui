@@ -60,7 +60,7 @@ func (b *Box) Add(child Widget) *Box {
 }
 
 func (b *Box) layout(component *VisualComponent) {
-	children := component.Children
+	children := component.children
 	if len(children) == 0 {
 		return
 	}
@@ -218,7 +218,7 @@ func (g *Grid) Add(child Widget) *Grid {
 }
 
 func (g *Grid) layout(component *VisualComponent) {
-	children := component.Children
+	children := component.children
 	if len(children) == 0 || g.Cols < 1 || g.Rows < 1 {
 		return
 	}

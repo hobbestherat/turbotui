@@ -32,7 +32,7 @@ func TestCheckboxFillsFullHeight(t *testing.T) {
 	app := tui.NewWithSize(12, 2, &bytes.Buffer{})
 	surface := newRootSurface(app)
 	cb := NewCheckbox("x", Rect{X: 0, Y: 0, W: 10, H: 2}, nil)
-	cb.Component.HasFocus = true
+	cb.Component.hasFocus = true
 	cb.draw(cb.Component, surface)
 
 	blank := tui.DefaultCell().BG

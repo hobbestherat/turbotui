@@ -133,7 +133,7 @@ func main() {
 		if !event.Down {
 			return true
 		}
-		content := component.Parent
+		content := component.Parent()
 		if content == nil {
 			return true
 		}

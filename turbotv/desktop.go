@@ -362,8 +362,8 @@ func (d *Desktop) raiseLayer(layer *Layer) bool {
 // layerForComponent returns the layer whose root is an ancestor of c, or nil.
 func (d *Desktop) layerForComponent(c *VisualComponent) *Layer {
 	root := c
-	for root.Parent != nil {
-		root = root.Parent
+	for root.parent != nil {
+		root = root.parent
 	}
 	for _, layer := range d.layerSnapshot() {
 		if layer != nil && layer.Root == root {
@@ -418,7 +418,7 @@ func componentInLayer(c *VisualComponent, layer *Layer) bool {
 	if layer == nil {
 		return false
 	}
-	for current := c; current != nil; current = current.Parent {
+	for current := c; current != nil; current = current.parent {
 		if current == layer.Root {
 			return true
 		}
@@ -437,8 +437,8 @@ func (d *Desktop) Redraw() {
 // menu is open.
 func (d *Desktop) updateCursor() {
 	menuOpen := d.menuBar != nil && d.menuBar.IsOpen()
-	if !menuOpen && d.focused != nil && d.focused.visibleInTree() && d.focused.CursorFn != nil {
-		if x, y, ok := d.focused.CursorFn(d.focused); ok {
+	if !menuOpen && d.focused != nil && d.focused.visibleInTree() {
+		if x, y, ok := d.focused.Cursor(); ok {
 			d.app.SetCursor(x, y)
 			return
 		}
@@ -651,10 +651,10 @@ func isCutKey(event tui.TypeEvent) bool {
 // copyFocused copies the focused component's CopyFn text to the clipboard,
 // returning true when something was copied.
 func (d *Desktop) copyFocused() bool {
-	if d.focused == nil || d.focused.CopyFn == nil {
+	if d.focused == nil {
 		return false
 	}
-	text, ok := d.focused.CopyFn(d.focused)
+	text, ok := d.focused.Copy()
 	if !ok {
 		return false
 	}
@@ -666,10 +666,10 @@ func (d *Desktop) copyFocused() bool {
 // and puts the removed text on the clipboard, returning true when something was
 // cut. It mirrors copyFocused so copy and cut stay symmetric.
 func (d *Desktop) cutFocused() bool {
-	if d.focused == nil || d.focused.CutFn == nil {
+	if d.focused == nil {
 		return false
 	}
-	text, ok := d.focused.CutFn(d.focused)
+	text, ok := d.focused.Cut()
 	if !ok {
 		return false
 	}
@@ -728,7 +728,7 @@ func (d *Desktop) refreshMnemonics() {
 
 func clearMnemonicActive(root *VisualComponent) {
 	root.mnemonicActive = false
-	for _, child := range root.Children {
+	for _, child := range root.children {
 		clearMnemonicActive(child)
 	}
 }
@@ -741,7 +741,7 @@ func activateMnemonics(root *VisualComponent, seen map[rune]bool) {
 		seen[root.Mnemonic] = true
 		root.mnemonicActive = true
 	}
-	for _, child := range root.Children {
+	for _, child := range root.children {
 		activateMnemonics(child, seen)
 	}
 }
@@ -770,7 +770,7 @@ func (d *Desktop) dispatchMnemonicTree(root *VisualComponent, lower rune) bool {
 		d.activateMnemonic(root)
 		return true
 	}
-	for _, child := range root.Children {
+	for _, child := range root.children {
 		if d.dispatchMnemonicTree(child, lower) {
 			return true
 		}
@@ -935,17 +935,13 @@ func (d *Desktop) setFocus(next *VisualComponent) {
 		return
 	}
 	if d.focused != nil {
-		d.focused.HasFocus = false
-		if d.focused.OnFocusFn != nil {
-			d.focused.OnFocusFn(d.focused, false)
-		}
+		d.focused.hasFocus = false
+		d.focused.HandleFocus(false)
 	}
 	d.focused = next
 	if d.focused != nil {
-		d.focused.HasFocus = true
-		if d.focused.OnFocusFn != nil {
-			d.focused.OnFocusFn(d.focused, true)
-		}
+		d.focused.hasFocus = true
+		d.focused.HandleFocus(true)
 	}
 }
 

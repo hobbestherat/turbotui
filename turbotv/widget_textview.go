@@ -299,7 +299,7 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		surface.WriteString(x, abs.Y+screenRow, Truncate(row.text, limit, ellipsis), tui.Cell{FG: fg, BG: t.BG})
 	}
 	if bar {
-		t.drawScrollbar(surface, abs, component.HasFocus, len(rows))
+		t.drawScrollbar(surface, abs, component.Focused(), len(rows))
 	}
 }
 

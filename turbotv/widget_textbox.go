@@ -59,7 +59,7 @@ func (t *TextBox) GetText() string {
 
 func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
-	fg, bg := focusColors(component.HasFocus, t.FG, t.BG, t.FocusFG, t.FocusBG)
+	fg, bg := focusColors(component.Focused(), t.FG, t.BG, t.FocusFG, t.FocusBG)
 	textStyle := tui.Cell{FG: fg, BG: bg}
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 	visibleStart := t.ScrollX
@@ -83,7 +83,7 @@ func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 		}
 		surface.SetCell(abs.X+offset, abs.Y, cell)
 	}
-	if component.HasFocus {
+	if component.Focused() {
 		t.ensureCursorVisible(abs.W)
 	}
 }
