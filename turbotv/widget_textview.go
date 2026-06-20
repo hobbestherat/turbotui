@@ -6,13 +6,32 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
+// StyledSpan is a contiguous run of text within a single logical line that shares
+// one style. A line built from spans can mix colours, bold, italic, underline and
+// background per run — the foundation for rendering inline-formatted text such as
+// Markdown. HasFG/HasBG select whether the span overrides the view's default
+// foreground/background; when false the TextView's FG/BG is used.
+type StyledSpan struct {
+	Text      string
+	FG        tui.Color
+	HasFG     bool
+	BG        tui.Color
+	HasBG     bool
+	Bold      bool
+	Underline bool
+	Italic    bool
+}
+
 // TextEntry is one logical line in a TextView. Entries may carry their own colour
 // and may be foldable, in which case their children are shown/hidden by clicking
 // the ▸/▾ marker. Build a tree with Add/AddColored and stream text with AppendText.
+// An entry created with AddStyled additionally carries per-span styling in spans;
+// its text mirrors the concatenated span text so AllText/copy stay correct.
 type TextEntry struct {
 	text      string
 	fg        tui.Color
 	hasFG     bool
+	spans     []StyledSpan
 	foldable  bool
 	collapsed bool
 	children  []*TextEntry
@@ -179,6 +198,27 @@ func (t *TextView) add(text string, fg tui.Color, hasFG bool) *TextEntry {
 	return entry
 }
 
+// AddStyled appends a logical line built from per-span styling. The entry's plain
+// text is the concatenation of the span texts, so AllText and copy behave exactly
+// as for AddLine/AddColored; the spans drive rendering (colour, bold, italic,
+// underline, background) and are split span-aware when the line is wrapped.
+func (t *TextView) AddStyled(spans []StyledSpan) *TextEntry {
+	entry := &TextEntry{text: spansText(spans), spans: spans, view: t}
+	t.entries = append(t.entries, entry)
+	t.touch()
+	return entry
+}
+
+// spansText concatenates the text of every span, giving the plain-text form of a
+// styled line.
+func spansText(spans []StyledSpan) string {
+	var b strings.Builder
+	for _, span := range spans {
+		b.WriteString(span.Text)
+	}
+	return b.String()
+}
+
 func (t *TextView) ScrollToBottom() {
 	t.follow = true
 }
@@ -205,9 +245,13 @@ func (t *TextView) touch() {
 }
 
 // renderRow is one physical display line: a (possibly wrapped) slice of an entry.
+// spans, when non-nil, carries the per-span styling covering this visual row (a
+// span-aware slice of the entry's spans); rows without spans render with a single
+// foreground via the plain path.
 type renderRow struct {
 	entry  *TextEntry
 	text   string
+	spans  []StyledSpan
 	indent int
 	marker rune // ▸/▾ on the first row of a foldable entry, else 0
 }
@@ -251,16 +295,32 @@ func (t *TextView) computeRows(width int) []renderRow {
 			if avail < 1 {
 				avail = 1
 			}
-			segments := []string{entry.text}
-			if t.Wrap {
-				segments = wrapText(entry.text, avail)
-			}
-			for index, segment := range segments {
-				row := renderRow{entry: entry, text: segment, indent: indent}
-				if index == 0 {
-					row.marker = marker
+			if len(entry.spans) > 0 {
+				// Styled line: wrap span-aware so each visual row keeps the per-span
+				// styling covering its segment.
+				rowSpans := [][]StyledSpan{entry.spans}
+				if t.Wrap {
+					rowSpans = wrapStyledSpans(entry.spans, avail)
 				}
-				rows = append(rows, row)
+				for index, segSpans := range rowSpans {
+					row := renderRow{entry: entry, text: spansText(segSpans), spans: segSpans, indent: indent}
+					if index == 0 {
+						row.marker = marker
+					}
+					rows = append(rows, row)
+				}
+			} else {
+				segments := []string{entry.text}
+				if t.Wrap {
+					segments = wrapText(entry.text, avail)
+				}
+				for index, segment := range segments {
+					row := renderRow{entry: entry, text: segment, indent: indent}
+					if index == 0 {
+						row.marker = marker
+					}
+					rows = append(rows, row)
+				}
 			}
 			if entry.foldable && !entry.collapsed {
 				walk(entry.children, depth+1)
@@ -298,6 +358,12 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		limit := textWidth - row.indent
 		if row.marker != 0 {
 			limit -= 2
+		}
+		// A styled row paints cell-by-cell so each span keeps its own colour and
+		// attributes; a plain row takes the single-fg fast path below.
+		if row.spans != nil {
+			t.drawStyledRow(surface, x, abs.Y+screenRow, row.spans, limit)
+			continue
 		}
 		// With wrap off a too-long line is clipped with a trailing ellipsis so the
 		// dropped tail is signalled rather than vanishing silently; wrapped rows
@@ -565,6 +631,177 @@ func wrapText(text string, width int) []string {
 	}
 	flush()
 	return rows
+}
+
+// drawStyledRow paints a styled visual row cell-by-cell, giving each span its own
+// foreground, background, bold, underline and italic, clipped to limit terminal
+// columns. It follows the per-cell SetCell pattern used for mnemonic highlighting
+// in widget_label.go; double-width glyphs advance two columns (the underlying
+// SetCell lays down the continuation cell).
+func (t *TextView) drawStyledRow(surface Surface, x int, y int, spans []StyledSpan, limit int) {
+	col := 0
+	for _, span := range spans {
+		style := tui.Cell{FG: t.FG, BG: t.BG, Bold: span.Bold, Underline: span.Underline, Italic: span.Italic}
+		if span.HasFG {
+			style.FG = span.FG
+		}
+		if span.HasBG {
+			style.BG = span.BG
+		}
+		for _, r := range span.Text {
+			w := tui.RuneWidth(r)
+			if w < 1 {
+				w = 1
+			}
+			if col+w > limit {
+				return
+			}
+			cell := style
+			cell.Ch = r
+			surface.SetCell(x+col, y, cell)
+			col += w
+		}
+	}
+}
+
+// styledRune is a single rune tagged with the index of the span it belongs to, so
+// span-aware wrapping can reconstruct per-row spans after breaking the line.
+type styledRune struct {
+	r    rune
+	span int
+}
+
+// wrapStyledSpans word-wraps a styled line to width terminal columns, returning one
+// []StyledSpan per visual row. It mirrors wrapText (same word-break and hard-split
+// rules, whitespace dropped at a wrap point) while preserving each span's styling:
+// the line is flattened to span-tagged runes, wrapped, then each row's runes are
+// regrouped back into spans by their span tag.
+func wrapStyledSpans(spans []StyledSpan, width int) [][]StyledSpan {
+	rows := wrapStyledRunes(styledRunesOf(spans), width)
+	out := make([][]StyledSpan, len(rows))
+	for i, row := range rows {
+		out[i] = spansOfStyledRow(row, spans)
+	}
+	return out
+}
+
+// styledRunesOf flattens spans into a single tagged-rune stream, expanding tabs to
+// tab stops (matching wrapText) and attributing each inserted space to the tab's
+// span so styling stays aligned.
+func styledRunesOf(spans []StyledSpan) []styledRune {
+	var out []styledRune
+	col := 0
+	for i, span := range spans {
+		for _, r := range span.Text {
+			if r == '\t' {
+				n := textViewTabWidth - col%textViewTabWidth
+				for k := 0; k < n; k++ {
+					out = append(out, styledRune{r: ' ', span: i})
+				}
+				col += n
+				continue
+			}
+			out = append(out, styledRune{r: r, span: i})
+			col++
+		}
+	}
+	return out
+}
+
+// wrapStyledRunes is the span-aware twin of wrapText: it breaks runes into rows no
+// wider than width runes, preferring word boundaries, hard-splitting tokens longer
+// than a whole line, and letting whitespace at a wrap point be absorbed by the
+// break so the following row starts aligned.
+func wrapStyledRunes(runes []styledRune, width int) [][]styledRune {
+	if width < 1 {
+		width = 1
+	}
+	if len(runes) == 0 {
+		return [][]styledRune{nil}
+	}
+	var rows [][]styledRune
+	line := make([]styledRune, 0, width)
+	flush := func() {
+		row := make([]styledRune, len(line))
+		copy(row, line)
+		rows = append(rows, row)
+		line = line[:0]
+	}
+	place := func(token []styledRune) {
+		for len(token) > 0 {
+			room := width - len(line)
+			if room <= 0 {
+				flush()
+				continue
+			}
+			if len(token) <= room {
+				line = append(line, token...)
+				return
+			}
+			if len(line) > 0 {
+				flush()
+				continue
+			}
+			line = append(line, token[:width]...)
+			token = token[width:]
+			flush()
+		}
+	}
+	first := true
+	for _, token := range tokenizeStyledWhitespace(runes) {
+		if token[0].r == ' ' && !first {
+			// Internal whitespace: keep the run while it still fits, else let the break
+			// absorb it rather than carrying a lone separator to the next row.
+			if len(line) > 0 && len(token) <= width-len(line) {
+				line = append(line, token...)
+			} else if len(line) > 0 {
+				flush()
+			}
+		} else {
+			place(token)
+		}
+		first = false
+	}
+	flush()
+	return rows
+}
+
+// tokenizeStyledWhitespace splits a tagged-rune stream into maximal runs that
+// alternate between spaces and non-spaces, the span-aware analogue of
+// tokenizeWhitespace. Tabs are assumed already expanded to spaces.
+func tokenizeStyledWhitespace(runes []styledRune) [][]styledRune {
+	var tokens [][]styledRune
+	for i := 0; i < len(runes); {
+		space := runes[i].r == ' '
+		j := i + 1
+		for j < len(runes) && (runes[j].r == ' ') == space {
+			j++
+		}
+		tokens = append(tokens, runes[i:j])
+		i = j
+	}
+	return tokens
+}
+
+// spansOfStyledRow regroups one wrapped row's tagged runes back into StyledSpans,
+// merging consecutive runes that share a span tag and copying that span's style.
+func spansOfStyledRow(row []styledRune, spans []StyledSpan) []StyledSpan {
+	var out []StyledSpan
+	for i := 0; i < len(row); {
+		j := i + 1
+		for j < len(row) && row[j].span == row[i].span {
+			j++
+		}
+		text := make([]rune, 0, j-i)
+		for _, sr := range row[i:j] {
+			text = append(text, sr.r)
+		}
+		seg := spans[row[i].span]
+		seg.Text = string(text)
+		out = append(out, seg)
+		i = j
+	}
+	return out
 }
 
 // tokenizeWhitespace splits text into a sequence of maximal runs that alternate

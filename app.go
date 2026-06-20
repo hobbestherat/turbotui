@@ -430,6 +430,7 @@ func (a *App) place(x int, y int, cell Cell, width int) {
 			BG:        cell.BG,
 			Bold:      cell.Bold,
 			Underline: cell.Underline,
+			Italic:    cell.Italic,
 			cont:      true,
 		})
 		return
@@ -653,6 +654,7 @@ func (a *App) Apply() error {
 				bg:        next.BG,
 				bold:      next.Bold,
 				underline: next.Underline,
+				italic:    next.Italic,
 			}
 			a.front.cells[index] = next
 		}

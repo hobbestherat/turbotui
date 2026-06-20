@@ -43,6 +43,7 @@ type Cell struct {
 	BG        Color
 	Bold      bool
 	Underline bool
+	Italic    bool
 	// cont marks this cell as the right half (continuation) of a double-width
 	// glyph occupying the cell to its left. Continuation cells are skipped by the
 	// flush so the wide glyph is emitted once and the terminal advances over both
@@ -114,6 +115,7 @@ type styleState struct {
 	bg        Color
 	bold      bool
 	underline bool
+	italic    bool
 }
 
 // The append* helpers below build escape sequences directly into a caller-owned
@@ -206,6 +208,9 @@ func appendStyle(buf []byte, cur styleState, cell Cell) []byte {
 		if cell.Underline {
 			buf = append(buf, ';', '4')
 		}
+		if cell.Italic {
+			buf = append(buf, ';', '3')
+		}
 		return append(buf, 'm')
 	}
 	start := len(buf)
@@ -229,6 +234,16 @@ func appendStyle(buf []byte, cur styleState, cell Cell) []byte {
 			buf = append(buf, '4')
 		} else {
 			buf = append(buf, '2', '4')
+		}
+	}
+	if cur.italic != cell.Italic {
+		if len(buf) > body {
+			buf = append(buf, ';')
+		}
+		if cell.Italic {
+			buf = append(buf, '3')
+		} else {
+			buf = append(buf, '2', '3')
 		}
 	}
 	if cur.fg != cell.FG {
