@@ -641,18 +641,39 @@ func wrapText(text string, width int) []string {
 
 // drawStyledRow paints a styled visual row one span at a time, giving each span its
 // own foreground, background, bold, underline and italic, clipped to limit terminal
-// columns. Each span is a uniform-style run, so it is drawn with Surface.WriteString
-// (truncated to the remaining column budget): that keeps the styled path consistent
-// with the plain path on display width, combining-mark folding and double-width
-// glyphs, rather than re-deriving that logic per rune.
+// columns. Each span is a uniform-style run drawn with Surface.WriteString, so the
+// styled path inherits the plain path's display-width, combining-mark folding and
+// double-width handling rather than re-deriving it per rune.
+//
+// Two details keep it cell-for-cell faithful to the single-pass plain path:
+//   - A span's leading zero-width runes (combining marks) are folded onto the end of
+//     the previous span's text, so a mark whose base glyph sits in an earlier span
+//     still attaches to that base instead of being dropped at the WriteString seam.
+//   - Once a span does not fully fit (it had to be truncated), drawing stops: the
+//     row is full, so a later narrow span cannot leak into a column the plain path —
+//     which truncates the whole row as one unit — would leave blank.
 func (t *TextView) drawStyledRow(surface Surface, x int, y int, spans []StyledSpan, limit int) {
-	col := 0
+	// segment is a uniform-style run to draw; building these first lets a span's
+	// leading combining marks migrate onto the previous run.
+	type segment struct {
+		text  string
+		style tui.Cell
+	}
+	segs := make([]segment, 0, len(spans))
 	for _, span := range spans {
-		if col >= limit {
-			return
+		runes := []rune(span.Text)
+		lead := 0
+		for lead < len(runes) && tui.RuneWidth(runes[lead]) == 0 {
+			lead++
 		}
-		text := Truncate(span.Text, limit-col, "")
-		if text == "" {
+		if lead > 0 && len(segs) > 0 {
+			// Fold leading combining marks onto the previous run so WriteString attaches
+			// them to its last base glyph. With no previous run they stay put, matching
+			// the plain path (a leading mark there also has no base).
+			segs[len(segs)-1].text += string(runes[:lead])
+			runes = runes[lead:]
+		}
+		if len(runes) == 0 {
 			continue
 		}
 		style := tui.Cell{FG: t.FG, BG: t.BG, Bold: span.Bold, Underline: span.Underline, Italic: span.Italic}
@@ -662,8 +683,22 @@ func (t *TextView) drawStyledRow(surface Surface, x int, y int, spans []StyledSp
 		if span.HasBG {
 			style.BG = span.BG
 		}
-		surface.WriteString(x+col, y, text, style)
-		col += tui.StringWidth(text)
+		segs = append(segs, segment{text: string(runes), style: style})
+	}
+	col := 0
+	for _, seg := range segs {
+		if col >= limit {
+			return
+		}
+		text := Truncate(seg.text, limit-col, "")
+		if text != "" {
+			surface.WriteString(x+col, y, text, seg.style)
+			col += tui.StringWidth(text)
+		}
+		if text != seg.text {
+			// This run was clipped to the limit; nothing after it can render.
+			return
+		}
 	}
 }
 
