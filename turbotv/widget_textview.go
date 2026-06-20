@@ -198,10 +198,13 @@ func (t *TextView) add(text string, fg tui.Color, hasFG bool) *TextEntry {
 	return entry
 }
 
-// AddStyled appends a logical line built from per-span styling. The entry's plain
-// text is the concatenation of the span texts, so AllText and copy behave exactly
-// as for AddLine/AddColored; the spans drive rendering (colour, bold, italic,
-// underline, background) and are split span-aware when the line is wrapped.
+// AddStyled appends one logical line built from per-span styling. The entry's
+// plain text is the concatenation of the span texts, so AllText and copy behave
+// exactly as for AddLine/AddColored; the spans drive rendering (colour, bold,
+// italic, underline, background) and are split span-aware when the line is
+// wrapped. Like AddLine, the spans are treated as a single line: embedded newlines
+// are not split into separate rows. For a styled entry the per-entry fg/hasFG
+// fields are unused — each span carries its own colour.
 func (t *TextView) AddStyled(spans []StyledSpan) *TextEntry {
 	entry := &TextEntry{text: spansText(spans), spans: spans, view: t}
 	t.entries = append(t.entries, entry)
@@ -359,9 +362,12 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		if row.marker != 0 {
 			limit -= 2
 		}
-		// A styled row paints cell-by-cell so each span keeps its own colour and
-		// attributes; a plain row takes the single-fg fast path below.
-		if row.spans != nil {
+		// A styled entry paints per span so each run keeps its own colour and
+		// attributes; a plain entry takes the single-fg fast path below. The entry's
+		// spans (not the per-row slice, which is nil for an empty wrapped row) decide
+		// the path, so an empty styled line stays on the styled path and paints
+		// nothing rather than silently falling back.
+		if len(row.entry.spans) > 0 {
 			t.drawStyledRow(surface, x, abs.Y+screenRow, row.spans, limit)
 			continue
 		}
@@ -633,14 +639,22 @@ func wrapText(text string, width int) []string {
 	return rows
 }
 
-// drawStyledRow paints a styled visual row cell-by-cell, giving each span its own
-// foreground, background, bold, underline and italic, clipped to limit terminal
-// columns. It follows the per-cell SetCell pattern used for mnemonic highlighting
-// in widget_label.go; double-width glyphs advance two columns (the underlying
-// SetCell lays down the continuation cell).
+// drawStyledRow paints a styled visual row one span at a time, giving each span its
+// own foreground, background, bold, underline and italic, clipped to limit terminal
+// columns. Each span is a uniform-style run, so it is drawn with Surface.WriteString
+// (truncated to the remaining column budget): that keeps the styled path consistent
+// with the plain path on display width, combining-mark folding and double-width
+// glyphs, rather than re-deriving that logic per rune.
 func (t *TextView) drawStyledRow(surface Surface, x int, y int, spans []StyledSpan, limit int) {
 	col := 0
 	for _, span := range spans {
+		if col >= limit {
+			return
+		}
+		text := Truncate(span.Text, limit-col, "")
+		if text == "" {
+			continue
+		}
 		style := tui.Cell{FG: t.FG, BG: t.BG, Bold: span.Bold, Underline: span.Underline, Italic: span.Italic}
 		if span.HasFG {
 			style.FG = span.FG
@@ -648,19 +662,8 @@ func (t *TextView) drawStyledRow(surface Surface, x int, y int, spans []StyledSp
 		if span.HasBG {
 			style.BG = span.BG
 		}
-		for _, r := range span.Text {
-			w := tui.RuneWidth(r)
-			if w < 1 {
-				w = 1
-			}
-			if col+w > limit {
-				return
-			}
-			cell := style
-			cell.Ch = r
-			surface.SetCell(x+col, y, cell)
-			col += w
-		}
+		surface.WriteString(x+col, y, text, style)
+		col += tui.StringWidth(text)
 	}
 }
 
@@ -675,7 +678,9 @@ type styledRune struct {
 // []StyledSpan per visual row. It mirrors wrapText (same word-break and hard-split
 // rules, whitespace dropped at a wrap point) while preserving each span's styling:
 // the line is flattened to span-tagged runes, wrapped, then each row's runes are
-// regrouped back into spans by their span tag.
+// regrouped back into spans by their span tag. Width is measured in runes, exactly
+// as wrapText measures it, so styled and plain lines wrap identically; double-width
+// glyphs are not counted as two columns here (a deliberate parity with wrapText).
 func wrapStyledSpans(spans []StyledSpan, width int) [][]StyledSpan {
 	rows := wrapStyledRunes(styledRunesOf(spans), width)
 	out := make([][]StyledSpan, len(rows))
