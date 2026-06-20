@@ -66,12 +66,27 @@ type TextView struct {
 	FG        tui.Color
 	BG        tui.Color
 	FocusFG   tui.Color
-	Wrap      bool
+	// Wrap controls whether long lines are soft-wrapped to fit the width.
+	// NewTextView defaults it to true (a scrolling viewer almost always wants
+	// wrapping); with it off, clipped lines are marked with a trailing ellipsis.
+	Wrap bool
 
 	entries       []*TextEntry
 	scrollY       int
 	follow        bool
 	draggingThumb bool
+	viewH         int // last drawn viewport height, used for PageUp/PageDown
+
+	// metric memo: caches the (rows, content width, scrollbar?) decision for a
+	// given content version and viewport size, so the steady-state redraw of an
+	// overflowing view does not repeat the two-width scrollbar probe every frame.
+	metricCached    bool
+	metricVersion   uint64
+	metricW         int
+	metricH         int
+	metricRows      []renderRow
+	metricTextWidth int
+	metricBar       bool
 
 	// layoutRows is memoised by (layoutVersion, cachedWidth, Wrap). layoutVersion
 	// is bumped by every content change (via touch), so an unchanged view drawn
@@ -91,6 +106,7 @@ func NewTextView(text string, bounds Rect) *TextView {
 		BG:      activeTheme.WindowBG,
 		FocusFG: activeTheme.MnemonicFG,
 		follow:  true,
+		Wrap:    true,
 	}
 	view.Component = NewComponent(bounds)
 	view.Component.Focusable = true
@@ -248,11 +264,11 @@ func (t *TextView) computeRows(width int) []renderRow {
 func (t *TextView) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: t.FG, BG: t.BG})
-	textWidth := abs.W - 1
-	if textWidth < 1 {
-		textWidth = abs.W
+	t.viewH = abs.H
+	if abs.W < 1 || abs.H < 1 {
+		return
 	}
-	rows := t.layoutRows(textWidth)
+	rows, textWidth, bar := t.metrics(abs)
 	t.clampScroll(len(rows), abs.H)
 	for screenRow := 0; screenRow < abs.H; screenRow++ {
 		index := t.scrollY + screenRow
@@ -273,15 +289,51 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		if row.marker != 0 {
 			limit -= 2
 		}
-		text := []rune(row.text)
-		if limit > 0 && len(text) > limit {
-			text = text[:limit]
+		// With wrap off a too-long line is clipped with a trailing ellipsis so the
+		// dropped tail is signalled rather than vanishing silently; wrapped rows
+		// already fit, so they are only width-clipped (no ellipsis) for safety.
+		ellipsis := "…"
+		if t.Wrap {
+			ellipsis = ""
 		}
-		surface.WriteString(x, abs.Y+screenRow, string(text), tui.Cell{FG: fg, BG: t.BG})
+		surface.WriteString(x, abs.Y+screenRow, Truncate(row.text, limit, ellipsis), tui.Cell{FG: fg, BG: t.BG})
 	}
-	if abs.W > 1 {
+	if bar {
 		t.drawScrollbar(surface, abs, component.HasFocus, len(rows))
 	}
+}
+
+// metrics resolves the row layout, the usable content width and whether a
+// scrollbar is shown for the given bounds. A bar (and its reserved column) is
+// only present when the content overflows the viewport, matching Tree/Select.
+// Narrowing by the reserved column can only add wrapped rows, so an overflow at
+// full width remains an overflow at width-1 — the decision is stable. The result
+// is memoised per (content version, width, height) so an idle overflowing view
+// does not re-run the probe each frame.
+func (t *TextView) metrics(abs Rect) ([]renderRow, int, bool) {
+	if t.metricCached && t.metricVersion == t.layoutVersion &&
+		t.metricW == abs.W && t.metricH == abs.H {
+		return t.metricRows, t.metricTextWidth, t.metricBar
+	}
+	textWidth := abs.W
+	if textWidth < 1 {
+		textWidth = 1
+	}
+	rows := t.layoutRows(textWidth)
+	bar := false
+	if abs.W > 1 && len(rows) > abs.H {
+		bar = true
+		textWidth = abs.W - 1
+		rows = t.layoutRows(textWidth)
+	}
+	t.metricCached = true
+	t.metricVersion = t.layoutVersion
+	t.metricW = abs.W
+	t.metricH = abs.H
+	t.metricRows = rows
+	t.metricTextWidth = textWidth
+	t.metricBar = bar
+	return rows, textWidth, bar
 }
 
 func (t *TextView) clampScroll(total int, height int) {
@@ -322,7 +374,8 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		t.scrollToThumb(abs, event.Y)
 		return true
 	}
-	if abs.W > 1 && event.X == abs.Right() {
+	rows, _, bar := t.metrics(abs)
+	if bar && event.X == abs.Right() {
 		if event.Y == abs.Y {
 			t.scrollBy(-1)
 			return true
@@ -339,11 +392,6 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		}
 	}
 	// A click on a fold marker toggles that entry.
-	textWidth := abs.W - 1
-	if textWidth < 1 {
-		textWidth = abs.W
-	}
-	rows := t.layoutRows(textWidth)
 	index := t.scrollY + (event.Y - abs.Y)
 	if index >= 0 && index < len(rows) {
 		row := rows[index]
@@ -361,11 +409,8 @@ func (t *TextView) scrollToThumb(abs Rect, y int) {
 	if track < 1 {
 		return
 	}
-	textWidth := abs.W - 1
-	if textWidth < 1 {
-		textWidth = abs.W
-	}
-	span := len(t.layoutRows(textWidth)) - abs.H
+	rows, _, _ := t.metrics(abs)
+	span := len(rows) - abs.H
 	if span <= 0 {
 		return
 	}
@@ -400,11 +445,7 @@ func (t *TextView) scrollBy(delta int) {
 		t.scrollY = 0
 	}
 	abs := t.Component.AbsoluteBounds()
-	textWidth := abs.W - 1
-	if textWidth < 1 {
-		textWidth = abs.W
-	}
-	rows := t.layoutRows(textWidth)
+	rows, _, _ := t.metrics(abs)
 	maxScroll := len(rows) - abs.H
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -427,17 +468,37 @@ func (t *TextView) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 		t.scrollBy(1)
 		return true
 	case tui.KeyPageUp:
-		t.scrollBy(-5)
+		t.scrollBy(-t.page())
 		return true
 	case tui.KeyPageDown:
-		t.scrollBy(5)
+		t.scrollBy(t.page())
 		return true
 	}
 	return false
 }
 
-// wrapText breaks text into segments no wider than width, preferring word breaks
-// but hard-splitting words that are themselves too long.
+// page is the PageUp/PageDown step: one viewport minus a line of overlap so the
+// reader keeps a line of context across the jump. It is derived from the height
+// recorded by the last draw.
+func (t *TextView) page() int {
+	page := t.viewH - 1
+	if page < 1 {
+		page = 1
+	}
+	return page
+}
+
+// textViewTabWidth is the tab stop used when expanding tabs before wrapping, so
+// indented and column-aligned content keeps its layout instead of collapsing
+// each tab to a single break.
+const textViewTabWidth = 8
+
+// wrapText breaks text into segments no wider than width runes, preserving the
+// inter-word whitespace — leading indentation and internal runs of spaces — that
+// a naive strings.Fields pass would discard or collapse. Tabs are first expanded
+// to tab stops. Tokens (words or whitespace runs) longer than width are
+// hard-split; a line that fits whole is emitted verbatim, so the displayed text
+// matches the source.
 func wrapText(text string, width int) []string {
 	if width < 1 {
 		width = 1
@@ -445,33 +506,98 @@ func wrapText(text string, width int) []string {
 	if text == "" {
 		return []string{""}
 	}
+	text = expandTabs(text, textViewTabWidth)
 	var rows []string
-	for _, word := range strings.Fields(text) {
-		if len(rows) == 0 {
-			rows = append(rows, "")
+	line := make([]rune, 0, width)
+	flush := func() {
+		rows = append(rows, string(line))
+		line = line[:0]
+	}
+	// place lays content (leading indentation or a word) onto the current line,
+	// breaking when full and hard-splitting a token wider than a whole line.
+	place := func(runes []rune) {
+		for len(runes) > 0 {
+			room := width - len(line)
+			if room <= 0 {
+				flush()
+				continue
+			}
+			if len(runes) <= room {
+				line = append(line, runes...)
+				return
+			}
+			if len(line) > 0 {
+				flush()
+				continue
+			}
+			line = append(line, runes[:width]...)
+			runes = runes[width:]
+			flush()
 		}
-		last := rows[len(rows)-1]
-		candidate := word
-		if last != "" {
-			candidate = last + " " + word
+	}
+	first := true
+	for _, token := range tokenizeWhitespace(text) {
+		runes := []rune(token)
+		if token[0] == ' ' && !first {
+			// Internal whitespace: keep a run of spaces when it still fits on the
+			// current line so alignment survives; otherwise let it be absorbed by
+			// the line break instead of carrying a lone separator to the next row.
+			if len(line) > 0 && len(runes) <= width-len(line) {
+				line = append(line, runes...)
+			} else if len(line) > 0 {
+				flush()
+			}
+		} else {
+			// Leading indentation (the first token) and words are content.
+			place(runes)
 		}
-		if len([]rune(candidate)) <= width {
-			rows[len(rows)-1] = candidate
+		first = false
+	}
+	flush()
+	return rows
+}
+
+// tokenizeWhitespace splits text into a sequence of maximal runs that alternate
+// between spaces and non-spaces, so wrapping can keep the original separators
+// instead of discarding them. Tabs are assumed already expanded to spaces.
+func tokenizeWhitespace(text string) []string {
+	runes := []rune(text)
+	var tokens []string
+	for i := 0; i < len(runes); {
+		space := runes[i] == ' '
+		j := i + 1
+		for j < len(runes) && (runes[j] == ' ') == space {
+			j++
+		}
+		tokens = append(tokens, string(runes[i:j]))
+		i = j
+	}
+	return tokens
+}
+
+// expandTabs replaces each tab with spaces up to the next multiple of tab
+// columns, so aligned content survives wrapping. Columns are counted in runes,
+// matching wrapText's width measure.
+func expandTabs(text string, tab int) string {
+	if !strings.ContainsRune(text, '\t') {
+		return text
+	}
+	if tab < 1 {
+		tab = 1
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range text {
+		if r == '\t' {
+			n := tab - col%tab
+			for i := 0; i < n; i++ {
+				b.WriteByte(' ')
+			}
+			col += n
 			continue
 		}
-		if last != "" {
-			rows = append(rows, "")
-		}
-		runes := []rune(word)
-		for len(runes) > width {
-			rows[len(rows)-1] = string(runes[:width])
-			rows = append(rows, "")
-			runes = runes[width:]
-		}
-		rows[len(rows)-1] = string(runes)
+		b.WriteRune(r)
+		col++
 	}
-	if len(rows) == 0 {
-		rows = append(rows, "")
-	}
-	return rows
+	return b.String()
 }

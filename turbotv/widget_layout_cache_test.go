@@ -73,6 +73,7 @@ func TestTextViewLayoutRowsKeyedByWidth(t *testing.T) {
 // does not go through touch) is still detected and triggers a recompute.
 func TestTextViewLayoutRowsKeyedByWrap(t *testing.T) {
 	view := NewTextView("the quick brown fox jumps over the lazy dog", Rect{X: 0, Y: 0, W: 40, H: 10})
+	view.Wrap = false
 
 	noWrap := view.layoutRows(10)
 	view.Wrap = true
