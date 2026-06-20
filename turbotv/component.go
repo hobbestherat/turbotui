@@ -160,6 +160,19 @@ func (c *VisualComponent) AbsoluteBounds() Rect {
 	return c.abs
 }
 
+// visibleInTree reports whether the component and every ancestor is visible. A
+// focused widget whose container was hidden (e.g. a minimized window's content)
+// is therefore not visible-in-tree, so the desktop can stop routing keystrokes
+// and the hardware cursor to it.
+func (c *VisualComponent) visibleInTree() bool {
+	for current := c; current != nil; current = current.Parent {
+		if !current.Visible {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *VisualComponent) Draw(surface Surface) {
 	if !c.Visible {
 		return

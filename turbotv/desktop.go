@@ -15,6 +15,7 @@ type Desktop struct {
 	mouseCapture   *VisualComponent
 	menuBar        *MenuBar
 	unhandledKeyFn func(event tui.TypeEvent)
+	workArea       Rect
 }
 
 func NewDesktop(app *tui.App) *Desktop {
@@ -86,9 +87,45 @@ func (d *Desktop) SetMenuBar(bar *MenuBar) {
 
 func (d *Desktop) AddLayer(layer *Layer) {
 	d.layers = append(d.layers, layer)
+	if layer.window != nil {
+		layer.window.desktop = d
+	}
 	if layer.FullScreen {
 		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
 	}
+	d.Redraw()
+}
+
+// WorkArea is the region windows are constrained to when dragged, resized or
+// maximized (unless a window sets its own ConstrainTo). It defaults to the whole
+// desktop minus the menu-bar row, and can be narrowed with SetWorkArea to reserve
+// a region (e.g. a pinned sidebar) that windows must keep clear.
+func (d *Desktop) WorkArea() Rect {
+	if !d.workArea.Empty() {
+		return d.workArea
+	}
+	top := 0
+	if d.menuBar != nil {
+		top = 1
+	}
+	height := d.app.Height() - top
+	if height < 0 {
+		height = 0
+	}
+	return Rect{X: 0, Y: top, W: d.app.Width(), H: height}
+}
+
+// SetWorkArea reserves the area outside r: windows constrained to the desktop can
+// no longer be dragged, resized or maximized over it. Pass an empty rect (or call
+// ResetWorkArea) to fall back to the default full-desktop work area.
+func (d *Desktop) SetWorkArea(r Rect) {
+	d.workArea = r
+	d.Redraw()
+}
+
+// ResetWorkArea clears a reserved region set with SetWorkArea.
+func (d *Desktop) ResetWorkArea() {
+	d.workArea = Rect{}
 	d.Redraw()
 }
 
@@ -230,7 +267,7 @@ func (d *Desktop) Redraw() {
 // menu is open.
 func (d *Desktop) updateCursor() {
 	menuOpen := d.menuBar != nil && d.menuBar.IsOpen()
-	if !menuOpen && d.focused != nil && d.focused.Visible && d.focused.CursorFn != nil {
+	if !menuOpen && d.focused != nil && d.focused.visibleInTree() && d.focused.CursorFn != nil {
 		if x, y, ok := d.focused.CursorFn(d.focused); ok {
 			d.app.SetCursor(x, y)
 			return
@@ -356,7 +393,11 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	if isCopyKey(event) && d.copyFocused() {
 		return
 	}
-	if d.focused != nil {
+	// Only deliver to the focused widget when it (and all its ancestors) are
+	// visible; a focused descendant of a just-hidden container must not receive
+	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
+	// never leak to an off-screen widget.
+	if d.focused != nil && d.focused.visibleInTree() {
 		if d.focused.BubbleType(event) {
 			d.Redraw()
 			return

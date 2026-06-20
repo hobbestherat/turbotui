@@ -70,7 +70,7 @@ func main() {
 
 | Widget               | Constructor                                            | Notes |
 |----------------------|--------------------------------------------------------|-------|
-| `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`, draggable, close button |
+| `Window`             | `NewWindow(title, bounds, border)`                     | `AddContent`, `AddBottom`, `OnClose`/`Close()`, draggable, close/`Minimizable`/`Maximizable`/`Resizable` buttons; drag/resize/maximize clamped to the desktop work area (or `ConstrainTo`) |
 | `Button`             | `NewButton(label, bounds, onPress)`                    | Focus shown as `►Label◄`; Enter/Space activate |
 | `Label`              | `NewLabel(text, bounds)`                               | `SetTarget(widget)` forwards its mnemonic to another widget |
 | `TextBox`            | `NewTextBox(text, bounds)`                             | Single-line input; `GetText`/`SetText`; optional `OnSubmit` on Enter |
@@ -80,7 +80,7 @@ func main() {
 | `Checkbox`           | `NewCheckbox(label, bounds, onToggle)`                 | On/off toggle; `IsChecked`/`SetChecked`; Space/Enter/click |
 | `Tree`               | `NewTree(bounds)`                                      | Collapsible, scrollable tree; `AddRoot`, `Selected`, `OnSelect`/`OnActivate` |
 | `MenuBar`            | `NewMenuBar(bounds, menus...)`                         | See below |
-| `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers |
+| `Dialog`             | `NewDialog(title, x, y, w, h)`                         | Centered panel for modal layers; **Esc** closes it by default |
 
 All input widgets are focusable; `Tab`/`Shift+Tab` and arrow keys move focus
 within the top layer. State is read and written with explicit methods
@@ -191,6 +191,20 @@ tv.ShowConfirmYesNo(desktop, "Confirm", "Apply values?", func(yes bool) {
 
 `ShowConfirmYesNo` pushes a modal layer and returns it. For custom dialogs build
 a `tv.NewDialog(...)`, add widgets, and push it with `tv.NewModalLayer(...)`.
+A dialog (or window) added through a layer gets a back-reference to its desktop,
+so `dialog.Window.Close()` removes the layer and fires `OnClose` in one call, and
+a generic dialog closes on **Esc** by default (replace `Root().OnTypeFn` to change
+that).
+
+### Window placement constraints
+
+Drag, resize and maximize are clamped to the desktop **work area** — by default the
+whole screen minus the menu-bar row, so a title bar can never hide under the menu
+bar or off the left edge. Reserve a region (e.g. a pinned sidebar) with
+`desktop.SetWorkArea(rect)` so windows keep clear of everything outside `rect`, or
+bound a single window with `window.ConstrainTo = &rect`. Set `window.Maximizable`
+to add a `[▢]`/`[▣]` title-bar button (and use `Maximize()`/`Restore()` /
+`OnMaximize` from code); maximizing fills the work area.
 
 ## Theming
 
