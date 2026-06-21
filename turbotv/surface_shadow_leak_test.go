@@ -312,3 +312,62 @@ func TestShadowBandHealsOnOrdinaryApply(t *testing.T) {
 		t.Errorf("band cell after heal = %q, want %q", got, shadowGlyph)
 	}
 }
+
+// TestDrawShadowAtScreenEdgeClipsToBounds pins the behaviour when the element sits
+// at the bottom-right corner so its shadow band runs off the buffer. Every off-grid
+// band cell must be silently skipped (no panic, no out-of-bounds write) while the
+// in-bounds portion of the band still paints the shadow glyph.
+func TestDrawShadowAtScreenEdgeClipsToBounds(t *testing.T) {
+	const w, h = 5, 3
+	app := tui.NewWithSize(w, h, &bytes.Buffer{})
+	surface := newRootSurface(app)
+	shadow := tui.ANSIColor(8)
+	plantStaleGlyphs(app, w, h, staleGlyph)
+
+	// rect {3,1,2,1} -> Right()=4, Bottom()=1. Default style:
+	//   right band cols 5,6 row 2 — entirely off-grid (width 5 -> cols 0..4);
+	//   bottom band row 2 cols 4..6 — only (4,2) is on-grid.
+	rect := Rect{X: 3, Y: 1, W: 2, H: 1}
+	surface.DrawShadow(rect, shadow, DefaultShadowStyle)
+
+	// The single on-grid band cell must be owned by the shadow.
+	if got := app.ReadCell(4, 2).Ch; got != shadowGlyph {
+		t.Errorf("on-grid band cell (4,2) = %q, want %q", got, shadowGlyph)
+	}
+	// Reaching here at all means the off-grid writes were clipped without panicking.
+	// The cell just past the right edge is unreachable; nothing to assert there
+	// beyond the fact that DrawShadow returned.
+}
+
+// TestDrawShadowIdempotentAcrossRedraws confirms that shadowing a region that is
+// already shadow does not corrupt it or reintroduce a glyph: a redraw that re-runs
+// DrawShadow over its own band must leave every band cell the shadow glyph. This is
+// a stability guard for the redraw path (DrawShadow is called every frame), not a
+// repro of the original leak — that is covered by the leak tests above.
+func TestDrawShadowIdempotentAcrossRedraws(t *testing.T) {
+	const w, h = 10, 6
+	app := tui.NewWithSize(w, h, &bytes.Buffer{})
+	surface := newRootSurface(app)
+	shadow := tui.ANSIColor(8)
+	plantStaleGlyphs(app, w, h, staleGlyph)
+
+	rect := Rect{X: 1, Y: 1, W: 4, H: 2}
+	surface.DrawShadow(rect, shadow, DefaultShadowStyle)
+	first := shadowCells(app, shadow, w, h)
+	if len(first) == 0 {
+		t.Fatal("first DrawShadow painted no band cells")
+	}
+
+	// A second shadow pass over the same region (e.g. a redraw) must be a no-op on
+	// the glyph: every band cell stays the shadow glyph, never drifting to another.
+	surface.DrawShadow(rect, shadow, DefaultShadowStyle)
+	for cell := range first {
+		got := app.ReadCell(cell[0], cell[1])
+		if got.Ch != shadowGlyph {
+			t.Errorf("after re-shadow, band cell %v = %q, want %q (not idempotent)", cell, got.Ch, shadowGlyph)
+		}
+		if got.FG != shadow {
+			t.Errorf("after re-shadow, band cell %v FG=%v, want shadow colour", cell, got.FG)
+		}
+	}
+}
