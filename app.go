@@ -758,6 +758,10 @@ const (
 // appendCursorEscapes appends the control sequence needed to bring the real
 // terminal cursor in line with the desired state to buf (nothing when unchanged).
 func (a *App) appendCursorEscapes(buf []byte) []byte {
+	// Consume the force-redraw request (set by invalidateFront): it makes both the
+	// show and hide branches below re-emit even when the front record already
+	// matches. This runs only after Apply's pre-Run suppression check, so a
+	// suppressed frame leaves forceCursor set for the first real flush.
 	force := a.forceCursor
 	a.forceCursor = false
 	if a.cursorVisible {

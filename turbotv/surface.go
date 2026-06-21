@@ -212,13 +212,21 @@ const shadowGlyph = '░'
 // (so the shadow never reads as detached); style controls their thickness and
 // the top-left corner notch. A zero-thickness band is simply omitted.
 //
-// Each shadow cell is owned by the shadow: it always renders shadowGlyph in the
-// shadow colour over the cell's existing background, so the band is a pure
-// function of its geometry and never mirrors whatever glyph happens to sit
-// underneath. That deliberately does NOT dim underlying content — it prevents a
-// stale or bleed-through rune (a letter from a widget drawn into the column on an
-// earlier frame and never cleared) from leaking into the shadow as a stray
-// character. See drawShadowCell.
+// Each shadow cell owns its glyph and foreground: it always lays down shadowGlyph
+// in the shadow colour, so the band's texture is a pure function of its geometry
+// and never mirrors whatever rune happens to sit underneath. That is what stops a
+// stale or bleed-through letter (drawn into the column on an earlier frame and
+// never cleared) from leaking into the shadow as a stray character — the #213
+// symptom.
+//
+// The underlying background colour is deliberately PRESERVED, not owned: the
+// shadow reads as a translucent drop shadow that darkens whatever desktop or panel
+// it falls on (a themed background keeps its colour, dimmed by the shadowGlyph
+// texture) rather than punching a flat hole. The single shadow colour gives no
+// second tone to own the background with, and forcing one would break shadows cast
+// over a coloured desktop. One consequence: a *stale* background colour left in an
+// uncleared cell still shows through — scrubbing it is the compositor's job (clear
+// the back buffer before composing), not the shadow's. See drawShadowCell.
 func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 	right := rect.Right()
 	bottom := rect.Bottom()
