@@ -101,14 +101,21 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	if captionW > avail {
 		captionW = avail
 	}
-	displayW := leftW + captionW + rightW
-	start := face.X + (face.W-displayW)/2
-	if start < face.X {
-		start = face.X
+	// Pin the brackets flush to the face bounds and float only the caption between
+	// them, so face.W alone controls the visible "[ … ]" box width: buttons given
+	// equal bounds paint equal boxes regardless of label length (gogent#259). The
+	// caption keeps the exact X it had when the whole group was centred —
+	// face.X+leftW+(avail-captionW)/2 equals the old start+leftW — so buttons sized
+	// to buttonWidth(label) render identically; only wider faces change, spreading
+	// the brackets to the edges instead of leaving a narrower outline.
+	captionStart := face.X + leftW + (avail-captionW)/2
+	rightX := face.X + face.W - rightW
+	if rightX < face.X {
+		rightX = face.X // face narrower than the right bracket: clamp, never go left of the face
 	}
-	faceSurface.WriteString(start, face.Y, left, style)
-	drawMnemonicClipped(faceSurface, start+leftW, face.Y, b.Label, avail, style, component.mnemonicActive, activeTheme.MnemonicFG)
-	faceSurface.WriteString(start+leftW+captionW, face.Y, right, style)
+	faceSurface.WriteString(face.X, face.Y, left, style)
+	drawMnemonicClipped(faceSurface, captionStart, face.Y, b.Label, avail, style, component.mnemonicActive, activeTheme.MnemonicFG)
+	faceSurface.WriteString(rightX, face.Y, right, style)
 }
 
 func (b *Button) press() bool {
