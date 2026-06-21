@@ -21,6 +21,10 @@ type Select struct {
 	BG        tui.Color
 	FocusFG   tui.Color
 	FocusBG   tui.Color
+	// Shadow draws a drop shadow under the opened dropdown popup. It defaults to
+	// true; set it to false to render the list flat (e.g. for a no-shadow theme),
+	// mirroring the Shadow field on Window, Button and MenuBar.
+	Shadow bool
 
 	desktop   *Desktop
 	popup     *Layer
@@ -38,6 +42,7 @@ func NewSelect(desktop *Desktop, options []string, bounds Rect) *Select {
 		BG:      activeTheme.InputBG,
 		FocusFG: activeTheme.InputFocusFG,
 		FocusBG: activeTheme.InputFocusBG,
+		Shadow:  true,
 		desktop: desktop,
 	}
 	s.Component = NewComponent(bounds)
@@ -282,7 +287,9 @@ func (s *Select) ensureVisible() {
 
 func (s *Select) drawPopup(_ *VisualComponent, surface Surface) {
 	rect := s.popupRect()
-	surface.DrawShadow(rect, activeTheme.WindowShadow, DefaultShadowStyle)
+	if s.Shadow {
+		surface.DrawShadow(rect, activeTheme.WindowShadow, DefaultShadowStyle)
+	}
 	surface.Fill(rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
 	surface.DrawBox(rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
 	inner := Rect{X: rect.X + 1, Y: rect.Y + 1, W: rect.W - 2, H: rect.H - 2}
