@@ -114,6 +114,12 @@ type TextView struct {
 	selecting bool
 	pressRow  int
 	pressCol  int
+	// selWidth records the content width the selection's row indices were resolved
+	// against. Those indices address a layout that depends on width, so if the view
+	// is later drawn at a different width (a resize re-wraps the content into a
+	// different number of rows) the selection is dropped rather than left pointing
+	// at the wrong rows.
+	selWidth int
 
 	// metric memo: caches the (rows, content width, scrollbar?) decision for a
 	// given content version and viewport size, so the steady-state redraw of an
@@ -154,8 +160,21 @@ func NewTextView(text string, bounds Rect) *TextView {
 	view.Component.OnScrollFn = view.handleScroll
 	view.Component.OnClickFn = view.handleClick
 	view.Component.CopyFn = view.copySelection
+	view.Component.OnFocusFn = view.handleFocus
 	view.SetText(text)
 	return view
+}
+
+// handleFocus aborts an in-progress drag when the view loses focus. Without it a
+// drag interrupted by a focus change (no release event is delivered) would leave
+// selecting set, so the next press would be misread as a drag continuation that
+// extends the stale selection instead of starting a fresh one. The committed
+// selection itself is left intact so its highlight survives the focus change.
+func (t *TextView) handleFocus(_ *VisualComponent, focused bool) {
+	if !focused {
+		t.selecting = false
+		t.draggingThumb = false
+	}
 }
 
 // AllText returns the full logical content, one entry per line, including the
@@ -465,6 +484,13 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		return
 	}
 	rows, textWidth, bar := t.metrics(abs)
+	// A selection's row indices address the layout at the width it was made; if the
+	// view is now wider or narrower the content has re-wrapped, so the indices no
+	// longer line up — drop the selection rather than highlight (and later copy) the
+	// wrong rows.
+	if t.hasSelection() && t.selWidth != textWidth {
+		t.clearSelection()
+	}
 	t.clampScroll(len(rows), abs.H)
 	for screenRow := 0; screenRow < abs.H; screenRow++ {
 		index := t.scrollY + screenRow
@@ -504,7 +530,7 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		}
 		// Overlay the selection on top of the base render (plain or styled), so the
 		// highlight covers both paths uniformly.
-		t.drawSelection(surface, x, abs.Y+screenRow, index, row.text, limit)
+		t.drawSelection(surface, x, abs.Y+screenRow, index, limit)
 	}
 	if bar {
 		t.drawScrollbar(surface, abs, component.Focused(), len(rows))
@@ -512,30 +538,30 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 }
 
 // drawSelection repaints the selected cells of one visual row in the selection
-// colours, on top of whatever the base render already drew. text is the row's
-// displayed text and limit the number of columns available to it (after indent
-// and any fold marker). Columns past the end of the text are painted as blanks so
-// a multi-row selection runs to the right edge, matching MultiLineInput. Columns
-// are rune indices — the same one-rune-per-column simplification MultiLineInput
-// uses — which is exact for the ASCII content selection is used on.
-func (t *TextView) drawSelection(surface Surface, x int, y int, row int, text string, limit int) {
+// colours, on top of whatever the base render already drew. limit is the number
+// of columns available to the row (after indent and any fold marker). It recolours
+// each selected cell in place — reading back the cell the base pass drew and
+// swapping only FG/BG — so a styled span keeps its bold/italic/underline under the
+// highlight (matching MultiLineInput, which only overrides the colours). Columns
+// past the end of the text read back as blanks, so a multi-row selection runs to
+// the right edge. Columns are rune indices — the same one-rune-per-column
+// simplification MultiLineInput uses — exact for the ASCII content selection is
+// used on.
+func (t *TextView) drawSelection(surface Surface, x int, y int, row int, limit int) {
 	if !t.hasSelection() {
 		return
 	}
-	runes := []rune(text)
 	for col := 0; col < limit; col++ {
 		if !t.isSelected(row, col) {
 			continue
 		}
-		ch := ' '
-		if col < len(runes) {
-			ch = runes[col]
+		cell := surface.ReadCell(x+col, y)
+		if cell.Ch == 0 {
+			cell.Ch = ' '
 		}
-		surface.SetCell(x+col, y, tui.Cell{
-			Ch: ch,
-			FG: activeTheme.SelectionFG,
-			BG: activeTheme.SelectionBG,
-		})
+		cell.FG = activeTheme.SelectionFG
+		cell.BG = activeTheme.SelectionBG
+		surface.SetCell(x+col, y, cell)
 	}
 }
 
@@ -611,8 +637,15 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		t.scrollToThumb(abs, event.Y)
 		return true
 	}
-	rows, _, bar := t.metrics(abs)
-	if bar && event.X == abs.Right() {
+	rows, textWidth, bar := t.metrics(abs)
+	// Normalise scrollY to the valid range before mapping the pointer to a row, so a
+	// click that arrives before the first draw (while following, scrollY is a huge
+	// sentinel) lands on the right row instead of the last one.
+	t.clampScroll(len(rows), abs.H)
+	// The scrollbar only claims the pointer when a selection drag is not already in
+	// progress; mid-drag the pointer wandering onto the track must keep extending the
+	// selection rather than silently grabbing the thumb.
+	if !t.selecting && bar && event.X == abs.Right() {
 		if event.Y == abs.Y {
 			t.scrollBy(-1)
 			return true
@@ -671,6 +704,9 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 		t.pressCol = col
 		t.selAnchorRow = -1
 		t.selecting = true
+		// Remember the width this gesture's row indices are resolved against, so a
+		// later draw at a different width drops the selection instead of mis-mapping it.
+		t.selWidth = textWidth
 		return true
 	}
 	// Drag motion: the first time the pointer leaves the press point, anchor the

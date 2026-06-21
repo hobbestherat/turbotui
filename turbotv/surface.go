@@ -48,6 +48,17 @@ func (s Surface) SetCell(x int, y int, cell tui.Cell) {
 	s.app.WriteCell(x, y, cell)
 }
 
+// ReadCell returns the cell currently at (x,y), or the zero Cell when the
+// coordinate lies outside the surface's clip rect. It lets a widget recolour a
+// cell another pass already drew — e.g. overlaying a selection highlight — while
+// preserving its rune and text attributes instead of overwriting them.
+func (s Surface) ReadCell(x int, y int) tui.Cell {
+	if !s.clip.Contains(x, y) {
+		return tui.Cell{}
+	}
+	return s.app.ReadCell(x, y)
+}
+
 // WriteString draws text at (x,y), clipped to the surface's clip rect. It is
 // display-width aware: double-width glyphs advance two columns, combining marks
 // fold into the preceding glyph, and a wide glyph that would straddle the clip
