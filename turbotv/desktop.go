@@ -432,6 +432,20 @@ func (d *Desktop) Redraw() {
 	_ = d.app.Apply()
 }
 
+// RequestRedraw marks the desktop dirty without painting now. The run loop
+// coalesces every request accumulated while draining one batch of input events
+// (or posts) into a single compose + Apply per iteration (issue #17). The
+// input-event handlers use it instead of Redraw so a burst of mouse-motion
+// reports — the terminal emits one per cell crossed during a drag (?1002h) —
+// collapses into one repaint and one terminal write per read batch, instead of
+// a full synchronous flush per event that lets the event queue outrun the
+// drain and makes a dragged window trail the cursor (gogent#239). Redraw stays
+// the right call for paths that must be on screen synchronously within the same
+// handler; this is the hot-path counterpart that defers to the loop.
+func (d *Desktop) RequestRedraw() {
+	d.app.RequestRedraw()
+}
+
 // updateCursor positions the real terminal cursor at the focused widget's text
 // caret (via its CursorFn), or hides it when no focused input exposes one or a
 // menu is open.
@@ -494,7 +508,7 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 		// Route both press and release to the menubar so leaf items can activate
 		// on release (press-drag-release), letting the bar decide based on coords.
 		_ = d.menuBar.Component.BubbleClick(event)
-		d.Redraw()
+		d.RequestRedraw()
 		return
 	}
 	if event.Down {
@@ -519,7 +533,7 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 				d.setFocus(target)
 			}
 			_ = target.BubbleClick(event)
-			d.Redraw()
+			d.RequestRedraw()
 			return
 		}
 		d.mouseCapture = nil
@@ -528,6 +542,10 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 		// react via OnClickOutside instead of letting anything below activate.
 		if top := d.topInputLayer(); top != nil && top.Modal && top.OnClickOutside != nil {
 			top.OnClickOutside(top)
+			// The app's outside-click handler may mutate visible state (flag an
+			// error, nudge the dialog, …) without doing a layer operation of its own,
+			// so request a coalesced redraw; it paints nothing if nothing changed.
+			d.RequestRedraw()
 		}
 		return
 	}
@@ -539,7 +557,7 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 		_ = target.BubbleClick(event)
 	}
 	d.mouseCapture = nil
-	d.Redraw()
+	d.RequestRedraw()
 }
 
 func (d *Desktop) handleScroll(event tui.ScrollEvent) {
@@ -548,7 +566,7 @@ func (d *Desktop) handleScroll(event tui.ScrollEvent) {
 		return
 	}
 	if target.BubbleScroll(event) {
-		d.Redraw()
+		d.RequestRedraw()
 	}
 }
 
@@ -558,19 +576,19 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// shortcuts still fire while a menu is open.
 	if d.menuBar != nil && d.menuBar.IsOpen() {
 		if d.menuBar.HandleKey(event) {
-			d.Redraw()
+			d.RequestRedraw()
 			return
 		}
 	}
 	// Ctrl accelerators from the menubar, unless a modal layer blocks it.
 	if d.menuInScope() && d.menuBar.HandleAccelerator(event) {
-		d.Redraw()
+		d.RequestRedraw()
 		return
 	}
 	// Alt+mnemonic activation within the current scope (top layer + menubar).
 	if event.Key == tui.KeyRune && event.Alt {
 		if d.dispatchMnemonic(unicodeLower(event.Rune)) {
-			d.Redraw()
+			d.RequestRedraw()
 			return
 		}
 	}
@@ -584,6 +602,10 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// desktop puts the removed text on the clipboard. Consumed only when the
 	// widget had something cuttable, so the keystroke otherwise falls through.
 	if isCutKey(event) && d.cutFocused() {
+		// The cut mutated the focused widget (it removed the selection), so the
+		// screen must repaint. Copy above changes nothing visible and so requests
+		// no redraw — the asymmetry is deliberate.
+		d.RequestRedraw()
 		return
 	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
@@ -592,27 +614,31 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// never leak to an off-screen widget.
 	if d.focused != nil && d.focused.visibleInTree() {
 		if d.focused.BubbleType(event) {
-			d.Redraw()
+			d.RequestRedraw()
 			return
 		}
 	}
 	switch event.Key {
 	case tui.KeyTab:
 		d.moveFocus(true)
-		d.Redraw()
+		d.RequestRedraw()
 		return
 	case tui.KeyBackTab:
 		d.moveFocus(false)
-		d.Redraw()
+		d.RequestRedraw()
 		return
 	case tui.KeyLeft, tui.KeyRight, tui.KeyUp, tui.KeyDown:
 		if d.moveFocusDirection(event.Key) {
-			d.Redraw()
+			d.RequestRedraw()
 			return
 		}
 	}
 	if d.unhandledKeyFn != nil {
 		d.unhandledKeyFn(event)
+		// Like the modal OnClickOutside callback, an app's global-shortcut handler
+		// may change visible state without a layer operation; request a coalesced
+		// redraw so it paints (a no-op flush if nothing changed).
+		d.RequestRedraw()
 		return
 	}
 	// With no app-supplied handler, Ctrl+C is the conventional interrupt. Raw mode
@@ -687,7 +713,7 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 		return
 	}
 	if d.focused.BubblePaste(event.Text) {
-		d.Redraw()
+		d.RequestRedraw()
 	}
 }
 

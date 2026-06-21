@@ -124,10 +124,14 @@ func TestMenuLeafActivatesOnRelease(t *testing.T) {
 	base := NewComponent(Rect{X: 0, Y: 0, W: 60, H: 16})
 	desktop.AddLayer(NewFullscreenLayer("base", base))
 
-	desktop.handleType(altRune('f')) // open File (redraws -> popups laid out)
+	desktop.handleType(altRune('f')) // open File
 	if !menu.IsOpen() {
 		t.Fatalf("expected File menu open")
 	}
+	// Input handlers now request a coalesced redraw (gogent#239); the run loop
+	// would compose once per iteration. Drive that compose explicitly here so the
+	// popup layout the test reads is populated, as the loop would do.
+	desktop.compose()
 	leaf := menu.popupLayouts[0].itemRects[0]
 	cx, cy := leaf.X, leaf.Y
 
@@ -155,6 +159,7 @@ func TestMenuLeafReleaseOutsideCancels(t *testing.T) {
 	desktop.AddLayer(NewFullscreenLayer("base", base))
 
 	desktop.handleType(altRune('f'))
+	desktop.compose() // coalesced redraw is loop-driven now (gogent#239)
 	leaf := menu.popupLayouts[0].itemRects[0]
 	desktop.handleClick(down(leaf.X, leaf.Y))
 	desktop.handleClick(up(40, 10)) // release far away
