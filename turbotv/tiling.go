@@ -86,13 +86,21 @@ func TileRects(layout TileLayout, area Rect, n int) (rects []Rect, cols, rows in
 // SetBounds with its rect. nil entries are skipped but still consume their slot, so
 // the surviving windows keep their position in the layout. It returns the rects
 // applied (one per entry in windows, in order).
+//
+// A tiled window ends up neither minimized nor maximized — the same end state as
+// Restore — so, like Restore, it fires OnMinimize(w, false) / OnMaximize(w, false)
+// for any window that was actually leaving that state. This keeps listeners (a
+// "maximized" indicator, a minimized-windows list) in sync after a View→Tile rather
+// than going stale. A window that was already in normal state fires nothing.
 func TileWindows(layout TileLayout, area Rect, windows []*Window) []Rect {
 	rects, _, _ := TileRects(layout, area, len(windows))
 	for i, w := range windows {
 		if w == nil {
 			continue
 		}
-		if w.minimized {
+		wasMinimized := w.minimized
+		wasMaximized := w.maximized
+		if wasMinimized {
 			// Un-collapse exactly as Maximize does: drop the minimized flag and bring
 			// the content/bottom bar back before resizing.
 			w.minimized = false
@@ -101,6 +109,14 @@ func TileWindows(layout TileLayout, area Rect, windows []*Window) []Rect {
 		}
 		w.maximized = false
 		w.Component.SetBounds(rects[i])
+		// Notify listeners of the state transitions, after SetBounds, matching the
+		// order and the "false" edge Restore uses.
+		if wasMinimized && w.OnMinimize != nil {
+			w.OnMinimize(w, false)
+		}
+		if wasMaximized && w.OnMaximize != nil {
+			w.OnMaximize(w, false)
+		}
 	}
 	return rects
 }
