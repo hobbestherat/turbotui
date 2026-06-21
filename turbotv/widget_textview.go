@@ -82,6 +82,22 @@ func (e *TextEntry) addChild(text string, fg tui.Color, hasFG bool) *TextEntry {
 	return child
 }
 
+// AddStyled appends a styled child entry built from per-span styling, the
+// foldable-tree counterpart of (*TextView).AddStyled. The receiver becomes
+// foldable, so it gains a ▸/▾ marker and the child is indented one level and
+// shown/hidden as the receiver expands/collapses. The child's plain text is the
+// concatenation of the span texts, keeping AllText and copy correct; the spans
+// drive rendering (colour, bold, italic, underline, background) and are split
+// span-aware when the line is wrapped. As for AddColored, the child's per-entry
+// fg/hasFG fields are unused — each span carries its own colour.
+func (e *TextEntry) AddStyled(spans []StyledSpan) *TextEntry {
+	e.foldable = true
+	child := &TextEntry{text: spansText(spans), spans: spans, parent: e, view: e.view}
+	e.children = append(e.children, child)
+	e.view.touch()
+	return child
+}
+
 type TextView struct {
 	Component *VisualComponent
 	FG        tui.Color
