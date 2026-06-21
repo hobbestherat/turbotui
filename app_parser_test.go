@@ -37,7 +37,7 @@ func asTypeEvent(t *testing.T, ev any) TypeEvent {
 // checks in parseOneInput is caught here.
 func TestParseOneInputControlRange(t *testing.T) {
 	tests := []struct {
-		byte     byte
+		b        byte
 		ok       bool
 		consumed int
 		event    TypeEvent // meaningful only when hasEvent
@@ -77,24 +77,24 @@ func TestParseOneInputControlRange(t *testing.T) {
 		{0x1F, true, 1, wantCtrlEvent('_'), true},                   // ^_
 	}
 	for _, tc := range tests {
-		ev, consumed, ok := parseOneInput([]byte{tc.byte})
+		ev, consumed, ok := parseOneInput([]byte{tc.b})
 		if ok != tc.ok {
-			t.Errorf("0x%02x: ok = %v, want %v", tc.byte, ok, tc.ok)
+			t.Errorf("0x%02x: ok = %v, want %v", tc.b, ok, tc.ok)
 		}
 		if consumed != tc.consumed {
-			t.Errorf("0x%02x: consumed = %d, want %d (must advance to avoid wedging)", tc.byte, consumed, tc.consumed)
+			t.Errorf("0x%02x: consumed = %d, want %d (must advance to avoid wedging)", tc.b, consumed, tc.consumed)
 		}
 		if tc.hasEvent {
 			te, isType := ev.(TypeEvent)
 			if !isType {
-				t.Errorf("0x%02x: expected TypeEvent, got %T (%#v)", tc.byte, ev, ev)
+				t.Errorf("0x%02x: expected TypeEvent, got %T (%#v)", tc.b, ev, ev)
 				continue
 			}
 			if te != tc.event {
-				t.Errorf("0x%02x: event = %+v, want %+v", tc.byte, te, tc.event)
+				t.Errorf("0x%02x: event = %+v, want %+v", tc.b, te, tc.event)
 			}
 		} else if ev != nil {
-			t.Errorf("0x%02x: expected nil event, got %#v", tc.byte, ev)
+			t.Errorf("0x%02x: expected nil event, got %#v", tc.b, ev)
 		}
 	}
 }
@@ -111,11 +111,8 @@ func TestParseCtrlBracketMatchesGogentShortcut(t *testing.T) {
 	got := asTypeEvent(t, events[0])
 	want := TypeEvent{Key: KeyRune, Rune: ']', Ctrl: true}
 	if got != want {
+		// Covers the pre-fix buggy rune too: 0x1D + 'a' - 1 = '}' (125) != ']' (93).
 		t.Fatalf("Ctrl+] event = %+v, want %+v", got, want)
-	}
-	// Explicitly guard against the pre-fix buggy rune (0x1D + 'a' - 1 = '}' = 125).
-	if got.Rune == '}' {
-		t.Fatalf("regression: Ctrl+] decoded to buggy '}' rune (gogent #208)")
 	}
 }
 
@@ -236,6 +233,33 @@ func TestEscapeStartsCSISequence(t *testing.T) {
 	}
 }
 
+// TestEscapePlusControlByteIsRawRune documents behavior at the ESC seam: ESC used
+// as a meta (Alt) prefix before a byte from the corrected control range. The
+// escape/Alt branch decodes the byte as a literal rune rather than re-applying
+// caret notation, so ESC + 0x1D yields Rune 0x1D (29) with Alt — NOT ']' and NOT
+// Ctrl. The same physical byte 0x1D therefore decodes to ']' when bare but to 29
+// when ESC-prefixed.
+//
+// KNOWN INCONSISTENCY (not introduced by the #208 fix; the Alt branch predates
+// it). This test pins the current behavior so any change is deliberate. If
+// Alt+Ctrl+] is deemed worth supporting, fix parseEscape to emit
+// {Key: KeyRune, Rune: ']', Alt: true, Ctrl: true} and flip this assertion.
+func TestEscapePlusControlByteIsRawRune(t *testing.T) {
+	var parser inputParser
+	events := parser.Feed([]byte{0x1b, 0x1d}) // ESC + Ctrl+] byte
+	if len(events) != 1 {
+		t.Fatalf("ESC 0x1d should produce 1 event, got %d: %#v", len(events), events)
+	}
+	got := asTypeEvent(t, events[0])
+	want := TypeEvent{Key: KeyRune, Rune: 0x1d, Alt: true}
+	if got != want {
+		t.Fatalf("ESC 0x1d = %+v, want %+v (raw byte; see KNOWN INCONSISTENCY note)", got, want)
+	}
+	if got.Ctrl {
+		t.Errorf("ESC+0x1d must not set Ctrl under current behavior, got %+v", got)
+	}
+}
+
 // TestInterceptedControlBytesUnchanged verifies the bytes handled before the
 // control-decode branch (\t, \r, \n, DEL) are unaffected by the fix.
 func TestInterceptedControlBytesUnchanged(t *testing.T) {
@@ -321,5 +345,29 @@ func TestFeedSplitControlByte(t *testing.T) {
 	got := asTypeEvent(t, events[0])
 	if got != wantCtrlEvent(']') {
 		t.Fatalf("Ctrl+] after a split = %+v, want %+v", got, wantCtrlEvent(']'))
+	}
+}
+
+// TestBracketedPastePassesControlBytesLiterally ensures bytes 0x1C..0x1F inside a
+// bracketed paste are delivered verbatim as PasteEvent text, NOT decoded into
+// Ctrl+\ / Ctrl+] / Ctrl+^ / Ctrl+_ TypeEvents. A paste must look like text, not a
+// burst of keypresses (which could otherwise trigger accelerators).
+func TestBracketedPastePassesControlBytesLiterally(t *testing.T) {
+	var parser inputParser
+	// ESC[200~ <0x1C><0x1D><0x1E><0x1F> ESC[201~
+	events := parser.Feed([]byte("\x1b[200~\x1c\x1d\x1e\x1f\x1b[201~"))
+	if len(events) != 1 {
+		t.Fatalf("paste should produce 1 PasteEvent, got %d: %#v", len(events), events)
+	}
+	pe, ok := events[0].(PasteEvent)
+	if !ok {
+		t.Fatalf("expected PasteEvent, got %T: %#v", events[0], events[0])
+	}
+	want := "\x1c\x1d\x1e\x1f"
+	if pe.Text != want {
+		t.Fatalf("paste text = %q, want %q (control bytes verbatim)", pe.Text, want)
+	}
+	if len(parser.pending) != 0 {
+		t.Fatalf("parser left %d bytes pending after paste", len(parser.pending))
 	}
 }
