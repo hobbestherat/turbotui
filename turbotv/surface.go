@@ -203,10 +203,22 @@ var DefaultShadowStyle = ShadowStyle{
 	BottomHeight: 1,
 }
 
+// shadowGlyph is the texture a shadow cell lays down. The light-shade block is
+// the classic Turbo-Vision drop-shadow fill.
+const shadowGlyph = '░'
+
 // DrawShadow paints an L-shaped drop shadow hugging the element's right and
 // bottom edges. The bands always start at the cell immediately past the element
 // (so the shadow never reads as detached); style controls their thickness and
 // the top-left corner notch. A zero-thickness band is simply omitted.
+//
+// Each shadow cell is owned by the shadow: it always renders shadowGlyph in the
+// shadow colour over the cell's existing background, so the band is a pure
+// function of its geometry and never mirrors whatever glyph happens to sit
+// underneath. That deliberately does NOT dim underlying content — it prevents a
+// stale or bleed-through rune (a letter from a widget drawn into the column on an
+// earlier frame and never cleared) from leaking into the shadow as a stray
+// character. See drawShadowCell.
 func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 	right := rect.Right()
 	bottom := rect.Bottom()
@@ -226,17 +238,22 @@ func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 	}
 }
 
+// drawShadowCell paints one shadow cell. The shadow owns the cell: it lays down a
+// consistent shadowGlyph in the shadow colour, preserving only the underlying
+// background, and deliberately does NOT read and re-emit the underlying foreground
+// rune. Re-emitting it (the previous behaviour) could blit a stale or
+// bleed-through glyph — e.g. an 'e' from a label drawn into this column on an
+// earlier frame and never cleared — into the shadow band, where it reads as a
+// random stray character instead of shadow. Writing a deterministic cell also
+// guarantees the value differs from any prior content in the App's back buffer, so
+// the front/back diff repaints (heals) it on an ordinary frame.
 func (s Surface) drawShadowCell(x int, y int, color tui.Color) {
 	if !s.clip.Contains(x, y) {
 		return
 	}
 	under := s.app.ReadCell(x, y)
-	ch := under.Ch
-	if ch == 0 || ch == ' ' {
-		ch = '░'
-	}
 	s.app.WriteCell(x, y, tui.Cell{
-		Ch: ch,
+		Ch: shadowGlyph,
 		FG: color,
 		BG: under.BG,
 	})

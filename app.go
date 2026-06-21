@@ -606,6 +606,46 @@ func (a *App) invalidateFront() {
 	a.frontCursorVisible = false
 }
 
+// Invalidate forces the next Apply to repaint every cell and re-issue the cursor
+// state, by discarding the App's record of what is currently on the terminal.
+//
+// Apply normally writes only cells whose logical content changed since the last
+// frame. If the real terminal has drifted out of sync with that record — e.g. raw
+// escape bytes reached the terminal out of band and scrambled it — the diff keeps
+// skipping the genuinely-wrong cells and the artifact survives ordinary repaints
+// until that exact cell happens to change. Invalidate breaks that stall: the
+// following Apply redraws the whole screen, healing any such drift.
+//
+// Call it on the event-loop goroutine (e.g. from a Post callback), like the other
+// mutating methods. Prefer eliminating out-of-band writes (see WriteControl,
+// CopyToClipboard) over papering over them with a full repaint.
+func (a *App) Invalidate() {
+	a.invalidateFront()
+}
+
+// WriteControl writes a self-contained terminal control/escape sequence to the
+// output, serialised against frame flushes through the same lock Apply uses. It is
+// the notification counterpart of CopyToClipboard: it lets a caller emit a
+// sequence such as a BEL or an OSC notification (OSC 9 / OSC 777) without its bytes
+// splicing into an in-flight Apply frame and corrupting the escape stream.
+//
+// seq MUST be self-contained — it must not move the cursor, change SGR state, or
+// otherwise touch the cell grid — because Apply's front-buffer diff has no record
+// of it. (BEL, OSC 9, OSC 777 and OSC 52 all satisfy this.) For a sequence that
+// does disturb rendering, call Invalidate afterwards to force a full repaint.
+//
+// It is safe to call from any goroutine; the write is mutex-guarded. As with
+// CopyToClipboard, calling it on the event-loop goroutine (or via Post) is the
+// supported contract.
+func (a *App) WriteControl(seq string) {
+	if seq == "" {
+		return
+	}
+	a.writeMu.Lock()
+	_, _ = io.WriteString(a.out, seq)
+	a.writeMu.Unlock()
+}
+
 func (a *App) Apply() error {
 	// On a real terminal, suppress flushes until Run has switched to the
 	// alternate screen; otherwise frames composed during setup would leak onto
