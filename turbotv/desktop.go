@@ -542,6 +542,10 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 		// react via OnClickOutside instead of letting anything below activate.
 		if top := d.topInputLayer(); top != nil && top.Modal && top.OnClickOutside != nil {
 			top.OnClickOutside(top)
+			// The app's outside-click handler may mutate visible state (flag an
+			// error, nudge the dialog, …) without doing a layer operation of its own,
+			// so request a coalesced redraw; it paints nothing if nothing changed.
+			d.RequestRedraw()
 		}
 		return
 	}
@@ -598,6 +602,10 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// desktop puts the removed text on the clipboard. Consumed only when the
 	// widget had something cuttable, so the keystroke otherwise falls through.
 	if isCutKey(event) && d.cutFocused() {
+		// The cut mutated the focused widget (it removed the selection), so the
+		// screen must repaint. Copy above changes nothing visible and so requests
+		// no redraw — the asymmetry is deliberate.
+		d.RequestRedraw()
 		return
 	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
@@ -627,6 +635,10 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	}
 	if d.unhandledKeyFn != nil {
 		d.unhandledKeyFn(event)
+		// Like the modal OnClickOutside callback, an app's global-shortcut handler
+		// may change visible state without a layer operation; request a coalesced
+		// redraw so it paints (a no-op flush if nothing changed).
+		d.RequestRedraw()
 		return
 	}
 	// With no app-supplied handler, Ctrl+C is the conventional interrupt. Raw mode
