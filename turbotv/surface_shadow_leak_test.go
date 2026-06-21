@@ -214,6 +214,31 @@ func TestDrawShadowOverWideGlyphLeavesNoOrphan(t *testing.T) {
 	}
 }
 
+// TestDrawShadowOverWideGlyphContinuationHalf covers the edge case where the shadow
+// lands on the CONTINUATION (right) half of a wide glyph whose base sits beside the
+// band. The shadow must own the cell (shadowGlyph) and the orphaned base must be
+// blanked — no half-wide-glyph may linger on screen. Against the pre-fix code the
+// continuation cell stored ' ' so both behaviours agreed here, but the orphan-blank
+// contract is still worth pinning.
+func TestDrawShadowOverWideGlyphContinuationHalf(t *testing.T) {
+	app := tui.NewWithSize(5, 1, &bytes.Buffer{})
+	surface := newRootSurface(app)
+	shadow := tui.ANSIColor(8)
+
+	// Wide glyph at (0,0) occupies (0,0) (base) and (1,0) (continuation).
+	app.WriteCell(0, 0, tui.Cell{Ch: '世', FG: tui.ANSIColor(15), BG: tui.ANSIColor(4)})
+
+	// Shadow the continuation cell directly.
+	surface.drawShadowCell(1, 0, shadow)
+
+	if got := app.ReadCell(1, 0).Ch; got != shadowGlyph {
+		t.Errorf("continuation-half shadow cell Ch=%q, want %q", got, shadowGlyph)
+	}
+	if got := app.ReadCell(0, 0).Ch; got != ' ' {
+		t.Errorf("orphaned wide base at (0,0) = %q, want blank", got)
+	}
+}
+
 // TestDrawShadowRespectsSurfaceClip checks the clip guard in drawShadowCell: a
 // shadow cell that falls outside the surface's clip rect is left untouched, so the
 // shadow never overdraws a region it was not given. The untouched cell keeps its
@@ -277,6 +302,11 @@ func TestShadowBandHealsOnOrdinaryApply(t *testing.T) {
 	// The ordinary Apply must have repainted the band cell to the shadow glyph.
 	if !strings.Contains(buf.String(), string(shadowGlyph)) {
 		t.Errorf("ordinary repaint did not heal the shadow cell; output=%q", buf.String())
+	}
+	// The stale glyph must be gone from the wire too: the band cell is repainted as
+	// the shadow glyph, so the stray 'e' no longer reaches the terminal.
+	if strings.Contains(buf.String(), string(staleGlyph)) {
+		t.Errorf("stale glyph %q still present in the repaint output; not healed: %q", staleGlyph, buf.String())
 	}
 	if got := app.ReadCell(bandX, bandY).Ch; got != shadowGlyph {
 		t.Errorf("band cell after heal = %q, want %q", got, shadowGlyph)

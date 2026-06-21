@@ -223,3 +223,115 @@ func TestWriteControlConcurrentByteIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteControlDoesNotSpliceApplyFrame tests WriteControl's headline contract:
+// its bytes must never splice into an in-flight Apply frame. One goroutine drives
+// Apply (the sole back-buffer mutator, matching the loop-goroutine contract); several
+// background goroutines fire WriteControl concurrently. Both write a.out under
+// writeMu, so on the wire every marker lands between frames, never inside one. If
+// WriteControl ever stopped sharing writeMu with Apply, a marker would appear inside
+// a syncBegin..syncEnd span and this test would catch it.
+func TestWriteControlDoesNotSpliceApplyFrame(t *testing.T) {
+	var buf bytes.Buffer
+	app := NewWithSize(8, 1, &buf)
+	app.Clear(DefaultCell())
+
+	const wcGoroutines = 4
+	const iters = 200
+	marker := "\x1b]9;m\x07"
+
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		for i := 0; i < iters; i++ {
+			ch := rune('A' + (i % 26))
+			app.WriteCell(0, 0, Cell{Ch: ch, FG: ANSIColor(15), BG: ANSIColor(0)})
+			if err := app.Apply(); err != nil {
+				t.Errorf("apply: %v", err)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for g := 0; g < wcGoroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				app.WriteControl(marker)
+			}
+		}()
+	}
+	wg.Wait()
+	<-loopDone
+
+	got := buf.String()
+	if n := strings.Count(got, marker); n != wcGoroutines*iters {
+		t.Errorf("lost/truncated WriteControl markers: got %d, want %d", n, wcGoroutines*iters)
+	}
+	if spliced := countMarkersInsideFrames(got, marker); spliced != 0 {
+		t.Errorf("%d WriteControl marker(s) spliced into an Apply frame; writeMu is not serialising WriteControl vs Apply", spliced)
+	}
+}
+
+// countMarkersInsideFrames returns how many copies of marker occur between a
+// syncBegin and its matching syncEnd in s — i.e. how many spliced into a frame.
+func countMarkersInsideFrames(s, marker string) int {
+	inFrame, spliced := 0, 0
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], syncBegin):
+			inFrame++
+			i += len(syncBegin)
+		case strings.HasPrefix(s[i:], syncEnd):
+			if inFrame > 0 {
+				inFrame--
+			}
+			i += len(syncEnd)
+		case strings.HasPrefix(s[i:], marker):
+			if inFrame > 0 {
+				spliced++
+			}
+			i += len(marker)
+		default:
+			i++
+		}
+	}
+	return spliced
+}
+
+// TestInvalidateReAssertsHiddenCursor exposes a defect in the current Invalidate
+// implementation. Invalidate's doc promises the next Apply "re-issue[s] the cursor
+// state" — the whole point of the primitive is to heal a terminal whose cursor state
+// drifted out of sync via out-of-band writes. That holds for a VISIBLE cursor (see
+// TestInvalidateReIssuesCursorState) but NOT for a HIDDEN one: invalidateFront only
+// sets frontCursorVisible=false, so when the cursor is meant to be hidden,
+// appendCursorEscapes hits its `!frontCursorVisible` early-return and emits no
+// \x1b[?25l. A drift that left the real cursor visible is therefore not healed.
+//
+// This test is EXPECTED TO FAIL until Invalidate forces the cursor to be re-asserted
+// regardless of visibility (e.g. via a separate "cursor dirty" bit / generation).
+func TestInvalidateReAssertsHiddenCursor(t *testing.T) {
+	const cursorHide = "\x1b[?25l"
+	var buf bytes.Buffer
+	app := NewWithSize(4, 1, &buf)
+	app.Clear(DefaultCell())
+	app.SetCursor(1, 0)
+	if err := app.Apply(); err != nil {
+		t.Fatalf("show apply: %v", err)
+	}
+	app.HideCursor()
+	if err := app.Apply(); err != nil {
+		t.Fatalf("hide apply: %v", err)
+	}
+
+	app.Invalidate()
+	buf.Reset()
+	if err := app.Apply(); err != nil {
+		t.Fatalf("post-invalidate apply: %v", err)
+	}
+	if !strings.Contains(buf.String(), cursorHide) {
+		t.Errorf("Invalidate did not re-assert the HIDDEN cursor after a full repaint; output=%q", buf.String())
+	}
+}
