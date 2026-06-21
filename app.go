@@ -185,6 +185,12 @@ type App struct {
 	frontCursorVisible bool
 	frontCursorX       int
 	frontCursorY       int
+	// forceCursor makes the next Apply re-emit the desired cursor state regardless
+	// of the front* record (set by invalidateFront). A single frontCursorVisible
+	// sentinel cannot force the hidden branch — false reads as both "unknown" and
+	// "already hidden" — so this flag drives the re-issue and is cleared after the
+	// emit.
+	forceCursor bool
 }
 
 // SetCursor positions the real terminal cursor and makes it visible. Widgets use
@@ -604,6 +610,70 @@ func (a *App) invalidateFront() {
 		a.front.cells[index] = Cell{}
 	}
 	a.frontCursorVisible = false
+	a.forceCursor = true
+}
+
+// Invalidate forces the next Apply to repaint every cell and re-issue the cursor
+// state, by discarding the App's record of what is currently on the terminal.
+//
+// Apply normally writes only cells whose logical content changed since the last
+// frame. If the real terminal has drifted out of sync with that record — e.g. raw
+// escape bytes reached the terminal out of band and scrambled it — the diff keeps
+// skipping the genuinely-wrong cells and the artifact survives ordinary repaints
+// until that exact cell happens to change. Invalidate breaks that stall: the
+// following Apply redraws the whole screen, healing any such drift.
+//
+// Call it on the event-loop goroutine (e.g. from a Post callback), like the other
+// mutating methods. Prefer eliminating out-of-band writes (see WriteControl,
+// CopyToClipboard) over papering over them with a full repaint.
+func (a *App) Invalidate() {
+	a.invalidateFront()
+}
+
+// WriteControl writes a self-contained terminal control/escape sequence to the
+// output, serialised against frame flushes through the same lock Apply uses. It is
+// the notification counterpart of CopyToClipboard: it lets a caller emit a
+// sequence such as a BEL or an OSC notification (OSC 9 / OSC 777) without its bytes
+// splicing into an in-flight Apply frame and corrupting the escape stream.
+//
+// seq MUST be self-contained — it must not move the cursor, change SGR state, or
+// otherwise touch the cell grid — because Apply's front-buffer diff has no record
+// of it. (BEL, OSC 9, OSC 777 and OSC 52 all satisfy this.) For a sequence that
+// does disturb rendering, call Invalidate afterwards to force a full repaint.
+//
+// Unlike Apply, WriteControl is NOT gated on the alternate-screen switch: it emits
+// even before Run has started. That is intentional — a bell or notification is not
+// screen content (it is not torn down with the alt screen), so it should fire
+// whenever it is requested. Do not route grid output through it expecting the
+// alt-screen suppression Apply provides.
+//
+// The write is best-effort: a failed write (closed/broken output) is discarded
+// rather than recorded, matching CopyToClipboard. A genuinely dead output is still
+// surfaced by the next Apply via LastApplyError / OnApplyError, which is what drives
+// Run's clean exit.
+//
+// It is safe to call from any goroutine; the write is mutex-guarded. As with
+// CopyToClipboard, calling it on the event-loop goroutine (or via Post) is the
+// supported contract.
+func (a *App) WriteControl(seq string) {
+	if seq == "" {
+		return
+	}
+	_ = a.writeOut(seq)
+}
+
+// writeOut writes s to the output holding writeMu, so it can never interleave with
+// an Apply frame, a WriteControl / CopyToClipboard sequence, or another control
+// write racing in from a background goroutine. Every raw write to a.out outside
+// Apply's frame flush goes through it — including the setup and teardown sequences,
+// which a background WriteControl could otherwise splice into and corrupt (the
+// terminal restore in particular). It returns the write error for callers that
+// surface it (setupTerminal); teardown paths ignore it.
+func (a *App) writeOut(s string) error {
+	a.writeMu.Lock()
+	_, err := io.WriteString(a.out, s)
+	a.writeMu.Unlock()
+	return err
 }
 
 func (a *App) Apply() error {
@@ -700,8 +770,14 @@ const (
 // appendCursorEscapes appends the control sequence needed to bring the real
 // terminal cursor in line with the desired state to buf (nothing when unchanged).
 func (a *App) appendCursorEscapes(buf []byte) []byte {
+	// Consume the force-redraw request (set by invalidateFront): it makes both the
+	// show and hide branches below re-emit even when the front record already
+	// matches. This runs only after Apply's pre-Run suppression check, so a
+	// suppressed frame leaves forceCursor set for the first real flush.
+	force := a.forceCursor
+	a.forceCursor = false
 	if a.cursorVisible {
-		if a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
+		if !force && a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
 			return buf
 		}
 		a.frontCursorVisible = true
@@ -710,7 +786,7 @@ func (a *App) appendCursorEscapes(buf []byte) []byte {
 		buf = appendCursorMove(buf, a.cursorX, a.cursorY)
 		return append(buf, "\x1b[?25h"...)
 	}
-	if !a.frontCursorVisible {
+	if !force && !a.frontCursorVisible {
 		return buf
 	}
 	a.frontCursorVisible = false
@@ -814,7 +890,7 @@ const teardownSequence = "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[
 // It is idempotent: the second call is a no-op once restoreState is cleared.
 func (a *App) restoreTerminal() {
 	if a.restoreState != nil {
-		_, _ = io.WriteString(a.out, teardownSequence)
+		_ = a.writeOut(teardownSequence)
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
 	}
@@ -833,14 +909,14 @@ func (a *App) CloseWithMessage(message string) {
 	if a.restoreState != nil {
 		a.restoreTerminal()
 	} else {
-		_, _ = io.WriteString(a.out, teardownSequence)
+		_ = a.writeOut(teardownSequence)
 		a.started = false
 	}
 	message = strings.Trim(message, "\n")
 	if strings.TrimSpace(message) == "" {
 		return
 	}
-	_, _ = io.WriteString(a.out, message+"\n")
+	_ = a.writeOut(message + "\n")
 }
 
 func (a *App) setupTerminal() error {
@@ -854,8 +930,7 @@ func (a *App) setupTerminal() error {
 	// reader on exit (issue #9); otherwise this Run's reads on a shared stdin would
 	// fail immediately against a deadline already in the past.
 	_ = a.in.SetReadDeadline(time.Time{})
-	_, err = io.WriteString(a.out, "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
-	return err
+	return a.writeOut("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
 }
 
 func (a *App) readInput(target chan<- []byte, errorsOut chan<- error) {
@@ -959,7 +1034,7 @@ func (a *App) resize(width int, height int) {
 		}
 	}
 	a.invalidateFront()
-	_, _ = io.WriteString(a.out, "\x1b[2J\x1b[H")
+	_ = a.writeOut("\x1b[2J\x1b[H")
 
 	event := ResizeEvent{Width: width, Height: height}
 	for _, handler := range a.resizeHandlers {

@@ -203,10 +203,30 @@ var DefaultShadowStyle = ShadowStyle{
 	BottomHeight: 1,
 }
 
+// shadowGlyph is the texture a shadow cell lays down. The light-shade block is
+// the classic Turbo-Vision drop-shadow fill.
+const shadowGlyph = '░'
+
 // DrawShadow paints an L-shaped drop shadow hugging the element's right and
 // bottom edges. The bands always start at the cell immediately past the element
 // (so the shadow never reads as detached); style controls their thickness and
 // the top-left corner notch. A zero-thickness band is simply omitted.
+//
+// Each shadow cell owns its glyph and foreground: it always lays down shadowGlyph
+// in the shadow colour, so the band's texture is a pure function of its geometry
+// and never mirrors whatever rune happens to sit underneath. That is what stops a
+// stale or bleed-through letter (drawn into the column on an earlier frame and
+// never cleared) from leaking into the shadow as a stray character — the #213
+// symptom.
+//
+// The underlying background colour is deliberately PRESERVED, not owned: the
+// shadow reads as a translucent drop shadow that darkens whatever desktop or panel
+// it falls on (a themed background keeps its colour, dimmed by the shadowGlyph
+// texture) rather than punching a flat hole. The single shadow colour gives no
+// second tone to own the background with, and forcing one would break shadows cast
+// over a coloured desktop. One consequence: a *stale* background colour left in an
+// uncleared cell still shows through — scrubbing it is the compositor's job (clear
+// the back buffer before composing), not the shadow's. See drawShadowCell.
 func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 	right := rect.Right()
 	bottom := rect.Bottom()
@@ -226,17 +246,25 @@ func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 	}
 }
 
+// drawShadowCell paints one shadow cell. The shadow owns the cell: it lays down a
+// consistent shadowGlyph in the shadow colour, preserving only the underlying
+// background, and deliberately does NOT read and re-emit the underlying foreground
+// rune. Re-emitting it (the previous behaviour) could blit a stale or
+// bleed-through glyph — e.g. an 'e' from a label drawn into this column on an
+// earlier frame and never cleared — into the shadow band, where it reads as a
+// random stray character instead of shadow. Writing a deterministic cell also
+// means that when the back buffer still holds a stale glyph here, the value now
+// differs from what the front buffer recorded, so an ordinary Apply repaints it.
+// (That heals back-buffer staleness; a terminal that has drifted out of sync with
+// the front buffer — front agreeing with back, terminal wrong — still needs
+// App.Invalidate to force a full repaint.)
 func (s Surface) drawShadowCell(x int, y int, color tui.Color) {
 	if !s.clip.Contains(x, y) {
 		return
 	}
 	under := s.app.ReadCell(x, y)
-	ch := under.Ch
-	if ch == 0 || ch == ' ' {
-		ch = '░'
-	}
 	s.app.WriteCell(x, y, tui.Cell{
-		Ch: ch,
+		Ch: shadowGlyph,
 		FG: color,
 		BG: under.BG,
 	})
