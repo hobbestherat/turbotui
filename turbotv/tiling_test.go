@@ -628,3 +628,249 @@ func TestTileWindowsMixedStates(t *testing.T) {
 		}
 	}
 }
+
+// --- TileWindows: minimize/maximize callbacks ------------------------------
+
+// cbEvent records one OnMinimize/OnMaximize invocation: the window pointer, the
+// bool argument, and the window's bounds as observed *inside* the callback (so
+// tests can prove SetBounds has already run).
+type cbEvent struct {
+	window *Window
+	flag   bool
+	bounds Rect
+}
+
+// cbRecorder captures OnMinimize/OnMaximize into per-channel slices.
+type cbRecorder struct {
+	minCalls []cbEvent
+	maxCalls []cbEvent
+}
+
+func (r *cbRecorder) attach(w *Window) {
+	w.OnMinimize = func(win *Window, minimized bool) {
+		r.minCalls = append(r.minCalls, cbEvent{window: win, flag: minimized, bounds: win.Component.Bounds})
+	}
+	w.OnMaximize = func(win *Window, maximized bool) {
+		r.maxCalls = append(r.maxCalls, cbEvent{window: win, flag: maximized, bounds: win.Component.Bounds})
+	}
+}
+
+// A minimized window fires OnMinimize(w, false) exactly once and does not fire
+// OnMaximize (a minimized window is never also maximized).
+func TestTileWindowsFiresOnMinimizeForMinimizedWindow(t *testing.T) {
+	w := NewWindow("min", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+	w.Minimize()
+	rec := &cbRecorder{}
+	rec.attach(w) // attach after setup so the Minimize() call doesn't pollute counts
+
+	rects := TileWindows(TileRows, Rect{X: 0, Y: 0, W: 30, H: 20}, []*Window{w})
+
+	if len(rec.minCalls) != 1 {
+		t.Fatalf("OnMinimize fired %d times, want 1", len(rec.minCalls))
+	}
+	if rec.minCalls[0].flag != false {
+		t.Errorf("OnMinimize arg = %v, want false", rec.minCalls[0].flag)
+	}
+	if rec.minCalls[0].window != w {
+		t.Errorf("OnMinimize passed window %p, want %p", rec.minCalls[0].window, w)
+	}
+	if rec.minCalls[0].bounds != rects[0] {
+		t.Errorf("OnMinimize observed bounds %+v != tiled rect %+v", rec.minCalls[0].bounds, rects[0])
+	}
+	if len(rec.maxCalls) != 0 {
+		t.Errorf("OnMaximize fired %d times on a minimized window, want 0", len(rec.maxCalls))
+	}
+}
+
+// A maximized window fires OnMaximize(w, false) exactly once and does not fire
+// OnMinimize.
+func TestTileWindowsFiresOnMaximizeForMaximizedWindow(t *testing.T) {
+	w := NewWindow("max", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+	w.Maximize()
+	rec := &cbRecorder{}
+	rec.attach(w)
+
+	rects := TileWindows(TileColumns, Rect{X: 0, Y: 0, W: 30, H: 20}, []*Window{w})
+
+	if len(rec.maxCalls) != 1 {
+		t.Fatalf("OnMaximize fired %d times, want 1", len(rec.maxCalls))
+	}
+	if rec.maxCalls[0].flag != false {
+		t.Errorf("OnMaximize arg = %v, want false", rec.maxCalls[0].flag)
+	}
+	if rec.maxCalls[0].window != w {
+		t.Errorf("OnMaximize passed window %p, want %p", rec.maxCalls[0].window, w)
+	}
+	if rec.maxCalls[0].bounds != rects[0] {
+		t.Errorf("OnMaximize observed bounds %+v != tiled rect %+v", rec.maxCalls[0].bounds, rects[0])
+	}
+	if len(rec.minCalls) != 0 {
+		t.Errorf("OnMinimize fired %d times on a maximized window, want 0", len(rec.minCalls))
+	}
+}
+
+// A window already in normal state fires neither callback.
+func TestTileWindowsFiresNoCallbacksForNormalWindow(t *testing.T) {
+	w := NewWindow("plain", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+	rec := &cbRecorder{}
+	rec.attach(w)
+	TileWindows(TileRows, Rect{X: 0, Y: 0, W: 30, H: 20}, []*Window{w})
+	if len(rec.minCalls) != 0 || len(rec.maxCalls) != 0 {
+		t.Errorf("normal window fired callbacks: min=%d max=%d, want 0/0", len(rec.minCalls), len(rec.maxCalls))
+	}
+}
+
+// Callbacks fire only after SetBounds and after the un-minimize chrome restore,
+// so a listener can read the post-state synchronously inside the handler.
+func TestTileWindowsCallbacksFireAfterSetBoundsAndUnminimize(t *testing.T) {
+	area := Rect{X: 0, Y: 0, W: 30, H: 20}
+	w := NewWindow("min", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+	w.BottomBar.Visible = true
+	w.Minimize()
+
+	var boundsAtCall Rect
+	var contentVisibleAtCall, bottomVisibleAtCall, minimizedAtCall bool
+	w.OnMinimize = func(win *Window, _ bool) {
+		boundsAtCall = win.Component.Bounds
+		contentVisibleAtCall = win.Content.Visible
+		bottomVisibleAtCall = win.BottomBar.Visible
+		minimizedAtCall = win.IsMinimized()
+	}
+	rects := TileWindows(TileRows, area, []*Window{w})
+
+	if boundsAtCall != rects[0] {
+		t.Errorf("bounds inside callback %+v != tiled rect %+v (SetBounds must run first)", boundsAtCall, rects[0])
+	}
+	if !contentVisibleAtCall {
+		t.Errorf("Content not visible inside callback (chrome restore must run first)")
+	}
+	if !bottomVisibleAtCall {
+		t.Errorf("BottomBar not restored inside callback (bottomWasVisible was true)")
+	}
+	if minimizedAtCall {
+		t.Errorf("window still minimized inside callback (flag must be cleared first)")
+	}
+}
+
+// In a mixed batch each window fires exactly the callback for the state it was
+// leaving, with its own pointer; nil and normal slots fire nothing.
+func TestTileWindowsCallbacksPerWindowInBatch(t *testing.T) {
+	mkMin := func() *Window {
+		w := NewWindow("min", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		w.Minimize()
+		return w
+	}
+	mkMax := func() *Window {
+		w := NewWindow("max", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		w.Maximize()
+		return w
+	}
+	mkPlain := func() *Window { return NewWindow("plain", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle) }
+
+	minW, maxW, plainW := mkMin(), mkMax(), mkPlain()
+	minRec, maxRec, plainRec := &cbRecorder{}, &cbRecorder{}, &cbRecorder{}
+	minRec.attach(minW)
+	maxRec.attach(maxW)
+	plainRec.attach(plainW)
+
+	TileWindows(TileGrid, Rect{X: 0, Y: 0, W: 40, H: 30}, []*Window{minW, nil, maxW, plainW})
+
+	if len(minRec.minCalls) != 1 || minRec.minCalls[0].flag != false || len(minRec.maxCalls) != 0 {
+		t.Errorf("minimized window: min=%v max=%d, want one min(false)/no max", minRec.minCalls, len(minRec.maxCalls))
+	}
+	if len(maxRec.maxCalls) != 1 || maxRec.maxCalls[0].flag != false || len(maxRec.minCalls) != 0 {
+		t.Errorf("maximized window: max=%v min=%d, want one max(false)/no min", maxRec.maxCalls, len(maxRec.minCalls))
+	}
+	if len(plainRec.minCalls) != 0 || len(plainRec.maxCalls) != 0 {
+		t.Errorf("normal window fired callbacks: min=%d max=%d", len(plainRec.minCalls), len(plainRec.maxCalls))
+	}
+}
+
+// TileWindows' callback semantics match Window.Restore's exactly (one fire, with
+// false) for a window leaving the minimized or maximized state.
+func TestTileWindowsCallbackParityWithRestore(t *testing.T) {
+	area := Rect{X: 0, Y: 0, W: 40, H: 30}
+
+	t.Run("maximized", func(t *testing.T) {
+		restored := NewWindow("r", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		restored.Maximize()
+		rr := &cbRecorder{}
+		rr.attach(restored)
+		restored.Restore()
+
+		tiled := NewWindow("t", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		tiled.Maximize()
+		rt := &cbRecorder{}
+		rt.attach(tiled)
+		TileWindows(TileGrid, area, []*Window{tiled})
+
+		if len(rr.maxCalls) != len(rt.maxCalls) || len(rt.maxCalls) != 1 {
+			t.Fatalf("max calls: restore=%d tile=%d, want 1/1", len(rr.maxCalls), len(rt.maxCalls))
+		}
+		if rr.maxCalls[0].flag != rt.maxCalls[0].flag || rt.maxCalls[0].flag != false {
+			t.Errorf("max flag: restore=%v tile=%v, want false/false", rr.maxCalls[0].flag, rt.maxCalls[0].flag)
+		}
+	})
+
+	t.Run("minimized", func(t *testing.T) {
+		restored := NewWindow("r", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		restored.Minimize()
+		rr := &cbRecorder{}
+		rr.attach(restored)
+		restored.Restore()
+
+		tiled := NewWindow("t", Rect{X: 0, Y: 0, W: 8, H: 6}, tui.LineSingle)
+		tiled.Minimize()
+		rt := &cbRecorder{}
+		rt.attach(tiled)
+		TileWindows(TileGrid, area, []*Window{tiled})
+
+		if len(rr.minCalls) != len(rt.minCalls) || len(rt.minCalls) != 1 {
+			t.Fatalf("min calls: restore=%d tile=%d, want 1/1", len(rr.minCalls), len(rt.minCalls))
+		}
+		if rr.minCalls[0].flag != rt.minCalls[0].flag || rt.minCalls[0].flag != false {
+			t.Errorf("min flag: restore=%v tile=%v, want false/false", rr.minCalls[0].flag, rt.minCalls[0].flag)
+		}
+	})
+}
+
+// Tiling into a degenerate area must not panic through the integrated
+// SetBounds -> window.layout path (the >=1 clamp yields 1x1 rects, and layout
+// guards W/H<2). State transitions and callbacks still behave.
+func TestTileWindowsDegenerateAreaNoPanic(t *testing.T) {
+	area := Rect{X: 0, Y: 0, W: 1, H: 1}
+	ws := newWindows(t, 4)
+	ws[0].Minimize()
+	ws[1].Maximize()
+	rec := &cbRecorder{}
+	rec.attach(ws[0])
+	rec.attach(ws[1])
+	rec.attach(ws[2])
+	rec.attach(ws[3])
+
+	var rects []Rect
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("TileWindows into 1x1 area panicked: %v", r)
+			}
+		}()
+		rects = TileWindows(TileGrid, area, ws)
+	}()
+
+	if len(rects) != 4 {
+		t.Fatalf("got %d rects, want 4", len(rects))
+	}
+	for i, w := range ws {
+		if w.Component.Bounds != rects[i] {
+			t.Errorf("window %d bounds %+v != rect %+v", i, w.Component.Bounds, rects[i])
+		}
+		if w.IsMinimized() || w.IsMaximized() {
+			t.Errorf("window %d still min/max", i)
+		}
+	}
+	// Callbacks still fire into a tiny area: ws[0] was minimized, ws[1] maximized.
+	if len(rec.minCalls) != 1 || len(rec.maxCalls) != 1 {
+		t.Errorf("callbacks into tiny area: min=%d max=%d, want 1/1", len(rec.minCalls), len(rec.maxCalls))
+	}
+}
