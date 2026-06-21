@@ -64,11 +64,13 @@ func (e *TextEntry) AddColored(text string, fg tui.Color) *TextEntry {
 
 func (e *TextEntry) Toggle() {
 	e.collapsed = !e.collapsed
+	e.view.clearSelection()
 	e.view.touch()
 }
 
 func (e *TextEntry) SetCollapsed(collapsed bool) {
 	e.collapsed = collapsed
+	e.view.clearSelection()
 	e.view.touch()
 }
 
@@ -96,6 +98,23 @@ type TextView struct {
 	draggingThumb bool
 	viewH         int // last drawn viewport height, used for PageUp/PageDown
 
+	// Drag-to-select state, mirroring MultiLineInput. Selection coordinates are
+	// (visual-row index, column) in the flattened layout returned by layoutRows.
+	// That layout depends only on content and width — not on scrollY — so the
+	// anchor/active rows stay valid while the user scrolls. selAnchorRow is -1 when
+	// there is no selection.
+	selAnchorRow int
+	selAnchorCol int
+	selActiveRow int
+	selActiveCol int
+	// selecting is true between a press and its release; while it is set, motion
+	// events extend the selection. pressRow/pressCol remember where the button went
+	// down so the anchor is only committed once the pointer drags away from that
+	// point — a plain click therefore leaves no selection.
+	selecting bool
+	pressRow  int
+	pressCol  int
+
 	// metric memo: caches the (rows, content width, scrollbar?) decision for a
 	// given content version and viewport size, so the steady-state redraw of an
 	// overflowing view does not repeat the two-width scrollbar probe every frame.
@@ -121,11 +140,12 @@ type TextView struct {
 
 func NewTextView(text string, bounds Rect) *TextView {
 	view := &TextView{
-		FG:      activeTheme.WindowFG,
-		BG:      activeTheme.WindowBG,
-		FocusFG: activeTheme.MnemonicFG,
-		follow:  true,
-		Wrap:    true,
+		FG:           activeTheme.WindowFG,
+		BG:           activeTheme.WindowBG,
+		FocusFG:      activeTheme.MnemonicFG,
+		follow:       true,
+		Wrap:         true,
+		selAnchorRow: -1,
 	}
 	view.Component = NewComponent(bounds)
 	view.Component.Focusable = true
@@ -133,7 +153,7 @@ func NewTextView(text string, bounds Rect) *TextView {
 	view.Component.OnTypeFn = view.handleType
 	view.Component.OnScrollFn = view.handleScroll
 	view.Component.OnClickFn = view.handleClick
-	view.Component.CopyFn = view.copyAll
+	view.Component.CopyFn = view.copySelection
 	view.SetText(text)
 	return view
 }
@@ -162,6 +182,107 @@ func (t *TextView) copyAll(_ *VisualComponent) (string, bool) {
 	return text, text != ""
 }
 
+// copySelection is the CopyFn: when the user has drag-selected a range it copies
+// exactly that range; otherwise it falls back to copying the whole content, the
+// long-standing behaviour. The empty case reports ok=false so a copy of nothing
+// is a no-op.
+func (t *TextView) copySelection(_ *VisualComponent) (string, bool) {
+	if t.hasSelection() {
+		text := t.selectionText()
+		return text, text != ""
+	}
+	text := t.AllText()
+	return text, text != ""
+}
+
+// clearSelection drops any active selection and aborts an in-progress drag. It is
+// called when the content or fold layout changes, since the row indices a
+// selection is expressed in would no longer line up with the new layout.
+func (t *TextView) clearSelection() {
+	t.selAnchorRow = -1
+	t.selecting = false
+}
+
+// hasSelection reports whether a non-empty selection is active.
+func (t *TextView) hasSelection() bool {
+	return t.selAnchorRow >= 0 &&
+		(t.selAnchorRow != t.selActiveRow || t.selAnchorCol != t.selActiveCol)
+}
+
+// selectionOrdered returns the selection as a forward-ordered (row0,col0,row1,col1)
+// so callers need not worry which end is the anchor.
+func (t *TextView) selectionOrdered() (int, int, int, int) {
+	r0, c0, r1, c1 := t.selAnchorRow, t.selAnchorCol, t.selActiveRow, t.selActiveCol
+	if r0 > r1 || (r0 == r1 && c0 > c1) {
+		r0, c0, r1, c1 = r1, c1, r0, c0
+	}
+	return r0, c0, r1, c1
+}
+
+// isSelected reports whether the given column of the given visual row falls inside
+// the selection. Columns are rune indices into the row's text; a column at or past
+// the end of the text can still be selected (the blank tail of a spanned row),
+// which the draw loop paints out to the right edge.
+func (t *TextView) isSelected(row int, col int) bool {
+	if !t.hasSelection() {
+		return false
+	}
+	r0, c0, r1, c1 := t.selectionOrdered()
+	if row < r0 || row > r1 {
+		return false
+	}
+	if r0 == r1 {
+		return col >= c0 && col < c1
+	}
+	if row == r0 {
+		return col >= c0
+	}
+	if row == r1 {
+		return col < c1
+	}
+	return true
+}
+
+// selectionText reconstructs the selected text from the wrapped layout. Rows that
+// belong to the same entry (wrapped continuations of one logical line) are joined
+// with no separator; rows that belong to different entries are joined with a
+// newline, so the copy matches AllText's one-line-per-entry shape. The result is
+// exactly the run of characters highlighted on screen.
+func (t *TextView) selectionText() string {
+	if !t.hasSelection() {
+		return ""
+	}
+	rows, _, _ := t.metrics(t.Component.AbsoluteBounds())
+	if len(rows) == 0 {
+		return ""
+	}
+	r0, c0, r1, c1 := t.selectionOrdered()
+	if r0 < 0 {
+		r0 = 0
+	}
+	if r1 >= len(rows) {
+		r1 = len(rows) - 1
+	}
+	var builder strings.Builder
+	for row := r0; row <= r1; row++ {
+		if row > r0 && rows[row].entry != rows[row-1].entry {
+			builder.WriteByte('\n')
+		}
+		runes := []rune(rows[row].text)
+		lo, hi := 0, len(runes)
+		if row == r0 {
+			lo = clampCol(len(runes), c0)
+		}
+		if row == r1 {
+			hi = clampCol(len(runes), c1)
+		}
+		if lo < hi {
+			builder.WriteString(string(runes[lo:hi]))
+		}
+	}
+	return builder.String()
+}
+
 func (t *TextView) Root() *VisualComponent {
 	return t.Component
 }
@@ -169,6 +290,7 @@ func (t *TextView) Root() *VisualComponent {
 // SetText replaces all content with plain lines (one entry per '\n').
 func (t *TextView) SetText(text string) {
 	t.entries = nil
+	t.clearSelection()
 	if text != "" {
 		for _, line := range strings.Split(text, "\n") {
 			t.AddLine(line)
@@ -180,6 +302,7 @@ func (t *TextView) Clear() {
 	t.entries = nil
 	t.scrollY = 0
 	t.follow = true
+	t.clearSelection()
 	t.layoutVersion++
 }
 
@@ -369,19 +492,50 @@ func (t *TextView) draw(component *VisualComponent, surface Surface) {
 		// nothing rather than silently falling back.
 		if len(row.entry.spans) > 0 {
 			t.drawStyledRow(surface, x, abs.Y+screenRow, row.spans, limit)
-			continue
+		} else {
+			// With wrap off a too-long line is clipped with a trailing ellipsis so the
+			// dropped tail is signalled rather than vanishing silently; wrapped rows
+			// already fit, so they are only width-clipped (no ellipsis) for safety.
+			ellipsis := "…"
+			if t.Wrap {
+				ellipsis = ""
+			}
+			surface.WriteString(x, abs.Y+screenRow, Truncate(row.text, limit, ellipsis), tui.Cell{FG: fg, BG: t.BG})
 		}
-		// With wrap off a too-long line is clipped with a trailing ellipsis so the
-		// dropped tail is signalled rather than vanishing silently; wrapped rows
-		// already fit, so they are only width-clipped (no ellipsis) for safety.
-		ellipsis := "…"
-		if t.Wrap {
-			ellipsis = ""
-		}
-		surface.WriteString(x, abs.Y+screenRow, Truncate(row.text, limit, ellipsis), tui.Cell{FG: fg, BG: t.BG})
+		// Overlay the selection on top of the base render (plain or styled), so the
+		// highlight covers both paths uniformly.
+		t.drawSelection(surface, x, abs.Y+screenRow, index, row.text, limit)
 	}
 	if bar {
 		t.drawScrollbar(surface, abs, component.Focused(), len(rows))
+	}
+}
+
+// drawSelection repaints the selected cells of one visual row in the selection
+// colours, on top of whatever the base render already drew. text is the row's
+// displayed text and limit the number of columns available to it (after indent
+// and any fold marker). Columns past the end of the text are painted as blanks so
+// a multi-row selection runs to the right edge, matching MultiLineInput. Columns
+// are rune indices — the same one-rune-per-column simplification MultiLineInput
+// uses — which is exact for the ASCII content selection is used on.
+func (t *TextView) drawSelection(surface Surface, x int, y int, row int, text string, limit int) {
+	if !t.hasSelection() {
+		return
+	}
+	runes := []rune(text)
+	for col := 0; col < limit; col++ {
+		if !t.isSelected(row, col) {
+			continue
+		}
+		ch := ' '
+		if col < len(runes) {
+			ch = runes[col]
+		}
+		surface.SetCell(x+col, y, tui.Cell{
+			Ch: ch,
+			FG: activeTheme.SelectionFG,
+			BG: activeTheme.SelectionBG,
+		})
 	}
 }
 
@@ -445,9 +599,10 @@ func (t *TextView) drawScrollbar(surface Surface, abs Rect, focused bool, total 
 
 func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent) bool {
 	abs := component.AbsoluteBounds()
-	// A release ends any in-progress thumb drag.
+	// A release ends any in-progress thumb drag or text selection.
 	if !event.Down {
 		t.draggingThumb = false
+		t.selecting = false
 		return true
 	}
 	// While dragging the thumb, every motion event maps the pointer Y to scroll,
@@ -473,16 +628,62 @@ func (t *TextView) handleClick(component *VisualComponent, event tui.ClickEvent)
 			return true
 		}
 	}
-	// A click on a fold marker toggles that entry.
+	// A fresh press on a fold marker toggles that entry (never during a drag, so
+	// dragging a selection across a marker does not collapse it).
 	index := t.scrollY + (event.Y - abs.Y)
-	if index >= 0 && index < len(rows) {
+	if !t.selecting && index >= 0 && index < len(rows) {
 		row := rows[index]
 		if row.marker != 0 && event.X >= abs.X+row.indent && event.X <= abs.X+row.indent+1 {
 			row.entry.Toggle()
 			return true
 		}
 	}
-	return false
+	if len(rows) == 0 {
+		return false
+	}
+	// Map the pointer to a visual row and a rune column within that row's text,
+	// accounting for the row's indent and any fold marker.
+	row := index
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(rows) {
+		row = len(rows) - 1
+	}
+	rr := rows[row]
+	textX := abs.X + rr.indent
+	if rr.marker != 0 {
+		textX += 2
+	}
+	col := event.X - textX
+	if col < 0 {
+		col = 0
+	}
+	col = clampCol(len([]rune(rr.text)), col)
+	if !t.selecting {
+		// Fresh press: it must land inside the view. Record the press point and clear
+		// any old selection, but do not anchor yet — only a drag starts a selection,
+		// so a plain click leaves nothing selected and copy still falls back to all.
+		if !abs.Contains(event.X, event.Y) {
+			return false
+		}
+		t.pressRow = row
+		t.pressCol = col
+		t.selAnchorRow = -1
+		t.selecting = true
+		return true
+	}
+	// Drag motion: the first time the pointer leaves the press point, anchor the
+	// selection there; then extend the active end to the current pointer position.
+	if row != t.pressRow || col != t.pressCol {
+		if t.selAnchorRow < 0 {
+			t.selAnchorRow = t.pressRow
+			t.selAnchorCol = t.pressCol
+		}
+		t.selActiveRow = row
+		t.selActiveCol = col
+	}
+	return true
 }
 
 // scrollToThumb maps a Y coordinate on the scrollbar track to a scroll offset.
