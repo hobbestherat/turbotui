@@ -1029,9 +1029,21 @@ func parseOneInput(data []byte) (any, int, bool) {
 		return TypeEvent{Key: KeyTab}, 1, true
 	}
 	if head < 0x20 {
+		// Decode C0 control bytes to their printable form via the standard
+		// caret-notation mapping (XOR 0x40), which is correct across the whole
+		// range: 0x01->'A' .. 0x1A->'Z', 0x1C->'\', 0x1D->']', 0x1E->'^',
+		// 0x1F->'_'. The earlier letter-only offset (head + 'a' - 1) was valid
+		// only for 0x01..0x1A and mis-mapped 0x1C..0x1F (e.g. Ctrl+] -> '}').
+		// Letters are folded to lower case to preserve the historical rune
+		// output for the already-working Ctrl+<letter> shortcuts. (ESC 0x1B is
+		// handled earlier by parseEscape and never reaches here.)
+		r := rune(head ^ 0x40)
+		if r >= 'A' && r <= 'Z' {
+			r += 'a' - 'A'
+		}
 		return TypeEvent{
 			Key:  KeyRune,
-			Rune: rune(head + 'a' - 1),
+			Rune: r,
 			Ctrl: true,
 		}, 1, true
 	}
