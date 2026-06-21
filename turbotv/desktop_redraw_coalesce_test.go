@@ -272,6 +272,57 @@ func TestSingleEventProducesOneFlush(t *testing.T) {
 	}
 }
 
+// ===== The single coalesced frame must show the FINAL state, not a stale one =====
+//
+// The count-based tests above prove the burst collapses to one repaint, but a
+// repaint that composed stale/intermediate state (e.g. snapping to the first
+// event instead of the last) would still pass them. This test reads back the
+// painted buffer after the single flush and asserts the marker sits at the LAST
+// event's column and the first column is cleared — i.e. the one frame reflects
+// the final burst state, which is the whole point of coalescing a drag.
+
+func TestCoalescedFlushPaintsFinalStateNotStale(t *testing.T) {
+	counter := &frameCounter{}
+	desktop := newCoalesceDesktop(t, counter, 40, 6)
+	const widgetX, widgetY, widgetW = 2, 2, 20
+	widget, _ := newMutableWidget(Rect{X: widgetX, Y: widgetY, W: widgetW, H: 1})
+	root := NewComponent(Rect{X: 0, Y: 0, W: 40, H: 6})
+	root.AddChild(widget)
+	desktop.AddLayer(NewLayer("top", root, true, false)) // paints marker at column 0
+	desktop.SetFocus(widget)
+
+	// Initial frame: marker sits at the widget's first column.
+	if got := desktop.App().ReadCell(widgetX, widgetY).Ch; got != '#' {
+		t.Fatalf("initial marker should be at col %d, got %q", widgetX, got)
+	}
+
+	resetFrames(counter)
+	// A burst that advances the marker `burst` times. newMutableWidget sets
+	// markX = hits % widgetW each handler run, so the final marker column (within
+	// the widget) is burst % widgetW.
+	const burst = 7
+	for i := 0; i < burst; i++ {
+		desktop.handleType(tui.TypeEvent{Key: tui.KeyRune, Rune: 'a'})
+	}
+	if counter.frames != 0 {
+		t.Fatalf("expected 0 synchronous flushes during burst, got %d", counter.frames)
+	}
+	finalCol := widgetX + (burst % widgetW) // absolute screen column of the marker
+	simulateLoopFlush(desktop)
+	if counter.frames != 1 {
+		t.Fatalf("expected exactly 1 coalesced flush, got %d", counter.frames)
+	}
+	// The single frame must reflect the LAST event: marker at finalCol, and the
+	// originally-marked first column cleared back to a space.
+	if got := desktop.App().ReadCell(finalCol, widgetY).Ch; got != '#' {
+		t.Fatalf("coalesced frame should paint the marker at the FINAL column %d, got %q (stale state?)",
+			finalCol, got)
+	}
+	if got := desktop.App().ReadCell(widgetX, widgetY).Ch; got != ' ' {
+		t.Fatalf("coalesced frame should have cleared the start column %d, got %q", widgetX, got)
+	}
+}
+
 // ===== Large burst (many read batches worth) still collapses to one flush =====
 
 func TestLargeBurstCoalescesToOneFlush(t *testing.T) {
