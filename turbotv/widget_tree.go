@@ -100,20 +100,26 @@ func (t *Tree) Selected() *TreeNode {
 // Selected() / the OnSelect callback: an offset into the currently visible
 // (flattened, collapse-aware) rows, not into Roots.
 //
+// It returns the index the selection actually landed on, or -1 if the tree is
+// empty (no selectable row). A returned value different from the requested index
+// signals that the request was clamped — the symmetric counterpart to
+// SelectNode's bool, so a caller need not re-read Selected() to detect a clamp.
+//
 // This is the programmatic counterpart to keyboard/mouse navigation, for callers
 // that drive the selection from outside the widget (e.g. syncing the tree to an
 // externally focused item). Unlike handleType/handleClick it deliberately does
 // NOT fire OnSelect: a caller that also listens on OnSelect (to push the
 // selection outward) would otherwise echo straight back into SetSelected and
-// loop. An empty tree leaves the selection at 0 and is otherwise a no-op.
-func (t *Tree) SetSelected(index int) {
+// loop. An empty tree leaves the selection pinned at 0 and is otherwise a no-op.
+func (t *Tree) SetSelected(index int) int {
 	rows := t.flatten()
 	if len(rows) == 0 {
 		t.selected = 0
-		return
+		return -1
 	}
 	t.selected = clampInt(index, 0, len(rows)-1)
 	t.ensureVisible()
+	return t.selected
 }
 
 // SelectNode moves the highlight bar to node, matched by pointer identity among

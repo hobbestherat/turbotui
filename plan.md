@@ -16,8 +16,10 @@ File: `turbotv/widget_tree.go`. Add programmatic selection that mirrors how
 path would otherwise echo back and loop.
 
 New public API on `*Tree`:
-- `SetSelected(index int)` — set the highlight to a visible-row index (the same
-  index space as `Selected()`); clamps into range and scrolls into view.
+- `SetSelected(index int) int` — set the highlight to a visible-row index (the
+  same index space as `Selected()`); clamps into range and scrolls into view.
+  Returns the index actually selected (or `-1` for an empty tree) so a caller can
+  detect a clamp — symmetric with `SelectNode`'s `bool`.
 - `SelectNode(node *TreeNode) bool` — move the highlight to `node` matched by
   pointer identity among the currently visible rows; returns whether it was
   found. No-op (returns false) for nil / not-visible / collapsed-subtree nodes.
