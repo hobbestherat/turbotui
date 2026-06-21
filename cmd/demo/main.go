@@ -84,7 +84,13 @@ func main() {
 	})
 
 	app.OnResize(func(_ tui.ResizeEvent) {
+		// resize() clears the screen and repaints the back buffer through this
+		// handler, but with a handler registered the engine does NOT self-flush
+		// (issue #19); it leaves flushing to the handler, like every other path
+		// below. Without this Apply the screen stays cleared until the next
+		// click/scroll/type triggers a flush.
 		drawStatic()
+		_ = app.Apply()
 	})
 
 	if err := app.Run(ctx); err != nil {

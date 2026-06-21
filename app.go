@@ -730,15 +730,15 @@ func (a *App) Run(ctx context.Context) error {
 	defer func() { _ = a.in.SetReadDeadline(time.Now()) }()
 
 	resizeChannel := make(chan os.Signal, 1)
-	signal.Notify(resizeChannel, syscall.SIGWINCH)
-	defer signal.Stop(resizeChannel)
+	stopResize := a.notifyResize(ctx, resizeChannel)
+	defer stopResize()
 
 	// Best-effort terminal restoration on fatal signals: a plain defer does not run
 	// when the process is killed by an unhandled signal, which would leave the
 	// terminal in raw mode on the alt screen (issue #22). Ctrl+C is delivered as a
 	// byte in raw mode, so trapping SIGINT only catches an external `kill -INT`.
 	fatalChannel := make(chan os.Signal, 1)
-	signal.Notify(fatalChannel, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+	signal.Notify(fatalChannel, fatalSignals()...)
 	defer signal.Stop(fatalChannel)
 
 	// A lone ESC byte can't be parsed immediately: it might begin an escape
@@ -754,7 +754,7 @@ func (a *App) Run(ctx context.Context) error {
 			a.Close()
 			if s, ok := sig.(syscall.Signal); ok {
 				signal.Reset(s)
-				_ = syscall.Kill(syscall.Getpid(), s)
+				reraiseSignal(s)
 			}
 			return nil
 		case err := <-errorChannel:
