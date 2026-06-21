@@ -185,6 +185,12 @@ type App struct {
 	frontCursorVisible bool
 	frontCursorX       int
 	frontCursorY       int
+	// forceCursor makes the next Apply re-emit the desired cursor state regardless
+	// of the front* record (set by invalidateFront). A single frontCursorVisible
+	// sentinel cannot force the hidden branch — false reads as both "unknown" and
+	// "already hidden" — so this flag drives the re-issue and is cleared after the
+	// emit.
+	forceCursor bool
 }
 
 // SetCursor positions the real terminal cursor and makes it visible. Widgets use
@@ -604,6 +610,7 @@ func (a *App) invalidateFront() {
 		a.front.cells[index] = Cell{}
 	}
 	a.frontCursorVisible = false
+	a.forceCursor = true
 }
 
 // Invalidate forces the next Apply to repaint every cell and re-issue the cursor
@@ -633,6 +640,17 @@ func (a *App) Invalidate() {
 // otherwise touch the cell grid — because Apply's front-buffer diff has no record
 // of it. (BEL, OSC 9, OSC 777 and OSC 52 all satisfy this.) For a sequence that
 // does disturb rendering, call Invalidate afterwards to force a full repaint.
+//
+// Unlike Apply, WriteControl is NOT gated on the alternate-screen switch: it emits
+// even before Run has started. That is intentional — a bell or notification is not
+// screen content (it is not torn down with the alt screen), so it should fire
+// whenever it is requested. Do not route grid output through it expecting the
+// alt-screen suppression Apply provides.
+//
+// The write is best-effort: a failed write (closed/broken output) is discarded
+// rather than recorded, matching CopyToClipboard. A genuinely dead output is still
+// surfaced by the next Apply via LastApplyError / OnApplyError, which is what drives
+// Run's clean exit.
 //
 // It is safe to call from any goroutine; the write is mutex-guarded. As with
 // CopyToClipboard, calling it on the event-loop goroutine (or via Post) is the
@@ -740,8 +758,10 @@ const (
 // appendCursorEscapes appends the control sequence needed to bring the real
 // terminal cursor in line with the desired state to buf (nothing when unchanged).
 func (a *App) appendCursorEscapes(buf []byte) []byte {
+	force := a.forceCursor
+	a.forceCursor = false
 	if a.cursorVisible {
-		if a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
+		if !force && a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
 			return buf
 		}
 		a.frontCursorVisible = true
@@ -750,7 +770,7 @@ func (a *App) appendCursorEscapes(buf []byte) []byte {
 		buf = appendCursorMove(buf, a.cursorX, a.cursorY)
 		return append(buf, "\x1b[?25h"...)
 	}
-	if !a.frontCursorVisible {
+	if !force && !a.frontCursorVisible {
 		return buf
 	}
 	a.frontCursorVisible = false

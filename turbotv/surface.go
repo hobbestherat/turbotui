@@ -245,8 +245,11 @@ func (s Surface) DrawShadow(rect Rect, color tui.Color, style ShadowStyle) {
 // bleed-through glyph — e.g. an 'e' from a label drawn into this column on an
 // earlier frame and never cleared — into the shadow band, where it reads as a
 // random stray character instead of shadow. Writing a deterministic cell also
-// guarantees the value differs from any prior content in the App's back buffer, so
-// the front/back diff repaints (heals) it on an ordinary frame.
+// means that when the back buffer still holds a stale glyph here, the value now
+// differs from what the front buffer recorded, so an ordinary Apply repaints it.
+// (That heals back-buffer staleness; a terminal that has drifted out of sync with
+// the front buffer — front agreeing with back, terminal wrong — still needs
+// App.Invalidate to force a full repaint.)
 func (s Surface) drawShadowCell(x int, y int, color tui.Color) {
 	if !s.clip.Contains(x, y) {
 		return
