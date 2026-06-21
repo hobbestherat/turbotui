@@ -659,9 +659,21 @@ func (a *App) WriteControl(seq string) {
 	if seq == "" {
 		return
 	}
+	_ = a.writeOut(seq)
+}
+
+// writeOut writes s to the output holding writeMu, so it can never interleave with
+// an Apply frame, a WriteControl / CopyToClipboard sequence, or another control
+// write racing in from a background goroutine. Every raw write to a.out outside
+// Apply's frame flush goes through it — including the setup and teardown sequences,
+// which a background WriteControl could otherwise splice into and corrupt (the
+// terminal restore in particular). It returns the write error for callers that
+// surface it (setupTerminal); teardown paths ignore it.
+func (a *App) writeOut(s string) error {
 	a.writeMu.Lock()
-	_, _ = io.WriteString(a.out, seq)
+	_, err := io.WriteString(a.out, s)
 	a.writeMu.Unlock()
+	return err
 }
 
 func (a *App) Apply() error {
@@ -878,7 +890,7 @@ const teardownSequence = "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[
 // It is idempotent: the second call is a no-op once restoreState is cleared.
 func (a *App) restoreTerminal() {
 	if a.restoreState != nil {
-		_, _ = io.WriteString(a.out, teardownSequence)
+		_ = a.writeOut(teardownSequence)
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
 	}
@@ -897,14 +909,14 @@ func (a *App) CloseWithMessage(message string) {
 	if a.restoreState != nil {
 		a.restoreTerminal()
 	} else {
-		_, _ = io.WriteString(a.out, teardownSequence)
+		_ = a.writeOut(teardownSequence)
 		a.started = false
 	}
 	message = strings.Trim(message, "\n")
 	if strings.TrimSpace(message) == "" {
 		return
 	}
-	_, _ = io.WriteString(a.out, message+"\n")
+	_ = a.writeOut(message + "\n")
 }
 
 func (a *App) setupTerminal() error {
@@ -918,8 +930,7 @@ func (a *App) setupTerminal() error {
 	// reader on exit (issue #9); otherwise this Run's reads on a shared stdin would
 	// fail immediately against a deadline already in the past.
 	_ = a.in.SetReadDeadline(time.Time{})
-	_, err = io.WriteString(a.out, "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
-	return err
+	return a.writeOut("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
 }
 
 func (a *App) readInput(target chan<- []byte, errorsOut chan<- error) {
@@ -1023,7 +1034,7 @@ func (a *App) resize(width int, height int) {
 		}
 	}
 	a.invalidateFront()
-	_, _ = io.WriteString(a.out, "\x1b[2J\x1b[H")
+	_ = a.writeOut("\x1b[2J\x1b[H")
 
 	event := ResizeEvent{Width: width, Height: height}
 	for _, handler := range a.resizeHandlers {
