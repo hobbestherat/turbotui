@@ -448,3 +448,103 @@ func TestReleaseOnEmptySpaceDefersAndPaintsNothing(t *testing.T) {
 		t.Fatalf("empty-space release changed nothing, but flushed %d frames", counter.frames)
 	}
 }
+
+// ===== Menu handleType paths coalesce (closing the gap the driver's manual
+// compose() calls left open in menu_window_test.go) =====
+//
+// handleType has three RequestRedraw sites while a menu is involved: opening via
+// an Alt+mnemonic, navigating an open menu via HandleKey, and firing a Ctrl
+// accelerator. The driver's menu tests force desktop.compose() by hand, which
+// bypasses the coalesced flush — so they would still pass if the redraw request
+// were dropped. These pin each path through the counting-writer harness instead:
+// zero synchronous flushes during the keystroke, exactly one after the loop flush.
+
+func newMenuDesktop(t *testing.T, counter *frameCounter) (*Desktop, *MenuBar) {
+	t.Helper()
+	desktop := newCoalesceDesktop(t, counter, 60, 16)
+	menu := NewMenuBar(Rect{X: 0, Y: 0, W: 60, H: 1},
+		NewSubMenu("&File",
+			NewMenuItem("&Open", func() {}),
+			NewMenuItem("&Save", func() {}),
+			NewMenuItem("&Quit", func() {}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
+		),
+	)
+	desktop.SetMenuBar(menu)
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 60, H: 16})))
+	return desktop, menu
+}
+
+func TestMenuOpenViaMnemonicCoalesces(t *testing.T) {
+	counter := &frameCounter{}
+	desktop, menu := newMenuDesktop(t, counter)
+	resetFrames(counter)
+
+	// Alt+F opens the File menu via dispatchMnemonic — the popup appears, so a
+	// synchronous redraw would have flushed. It must defer instead.
+	desktop.handleType(altRune('f'))
+	if !menu.IsOpen() {
+		t.Fatalf("expected File menu open")
+	}
+	if counter.frames != 0 {
+		t.Fatalf("menu open: expected 0 synchronous flushes, got %d", counter.frames)
+	}
+	simulateLoopFlush(desktop)
+	if counter.frames != 1 {
+		t.Fatalf("menu open: expected 1 flush after coalescing, got %d", counter.frames)
+	}
+}
+
+func TestMenuNavigateViaHandleKeyCoalesces(t *testing.T) {
+	counter := &frameCounter{}
+	desktop, menu := newMenuDesktop(t, counter)
+	desktop.handleType(altRune('f')) // open
+	if !menu.IsOpen() {
+		t.Fatalf("expected File menu open")
+	}
+	resetFrames(counter)
+
+	// Arrow-down navigates the open menu via menuBar.HandleKey, moving the
+	// highlight onto the next item — a visible change, so it must defer and then
+	// flush once.
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyDown})
+	if counter.frames != 0 {
+		t.Fatalf("menu navigate: expected 0 synchronous flushes, got %d", counter.frames)
+	}
+	simulateLoopFlush(desktop)
+	if counter.frames != 1 {
+		t.Fatalf("menu navigate: expected 1 flush after coalescing, got %d", counter.frames)
+	}
+}
+
+func TestMenuAcceleratorCoalesces(t *testing.T) {
+	counter := &frameCounter{}
+	desktop, menu := newMenuDesktop(t, counter)
+	fired := 0
+	// Observe the accelerator firing via the leaf's OnSelect (Children[2] = Quit).
+	menu.Menus[0].Children[2].OnSelect = func() { fired++ }
+	desktop.handleType(altRune('f')) // open
+	if !menu.IsOpen() {
+		t.Fatalf("expected File menu open")
+	}
+	simulateLoopFlush(desktop) // iteration 1: paint the open popup
+	resetFrames(counter)
+
+	// Ctrl+Q fires the accelerator and closes the menu (iteration 2). Closing a
+	// popup that is now on screen is a visible change, so it must defer and then
+	// flush once. (If open+close shared one batch the popup would never paint and
+	// the flush would rightly write nothing — so we settle the open first.)
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRune, Rune: 'q', Ctrl: true})
+	if fired != 1 {
+		t.Fatalf("expected the Ctrl+Q accelerator to fire, got %d", fired)
+	}
+	if menu.IsOpen() {
+		t.Fatalf("expected the accelerator to close the menu")
+	}
+	if counter.frames != 0 {
+		t.Fatalf("accelerator: expected 0 synchronous flushes, got %d", counter.frames)
+	}
+	simulateLoopFlush(desktop)
+	if counter.frames != 1 {
+		t.Fatalf("accelerator: expected 1 flush after coalescing, got %d", counter.frames)
+	}
+}
