@@ -95,6 +95,48 @@ func (t *Tree) Selected() *TreeNode {
 	return nil
 }
 
+// SetSelected moves the highlight bar to the visible row at index, clamping it
+// into range and scrolling it into view. The index is in the same space as
+// Selected() / the OnSelect callback: an offset into the currently visible
+// (flattened, collapse-aware) rows, not into Roots.
+//
+// This is the programmatic counterpart to keyboard/mouse navigation, for callers
+// that drive the selection from outside the widget (e.g. syncing the tree to an
+// externally focused item). Unlike handleType/handleClick it deliberately does
+// NOT fire OnSelect: a caller that also listens on OnSelect (to push the
+// selection outward) would otherwise echo straight back into SetSelected and
+// loop. An empty tree leaves the selection at 0 and is otherwise a no-op.
+func (t *Tree) SetSelected(index int) {
+	rows := t.flatten()
+	if len(rows) == 0 {
+		t.selected = 0
+		return
+	}
+	t.selected = clampInt(index, 0, len(rows)-1)
+	t.ensureVisible()
+}
+
+// SelectNode moves the highlight bar to node, matched by pointer identity among
+// the currently visible rows, and scrolls it into view. It reports whether the
+// node was found. A nil node, a node not in this tree, or one hidden inside a
+// collapsed subtree is not matched and leaves the selection unchanged (returns
+// false). Like SetSelected it does NOT fire OnSelect, so it is safe to call from
+// an OnSelect handler without looping.
+func (t *Tree) SelectNode(node *TreeNode) bool {
+	if node == nil {
+		return false
+	}
+	rows := t.flatten()
+	for i := range rows {
+		if rows[i].node == node {
+			t.selected = i
+			t.ensureVisible()
+			return true
+		}
+	}
+	return false
+}
+
 // flatten returns the currently visible rows (depth-first, skipping collapsed
 // subtrees). It reuses flatBuf across calls so the slice's backing array is not
 // reallocated on every draw/handler; the contents are recomputed each call from
