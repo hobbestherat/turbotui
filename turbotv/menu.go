@@ -590,10 +590,11 @@ func (m *MenuBar) HandleAccelerator(event tui.TypeEvent) bool {
 
 // Registry returns the menu's persistent BindingRegistry — the single instance the
 // accelerator path consults, owned by the MenuBar. It is built once (by NewMenuBar,
-// or lazily here for a MenuBar assembled without it) and is the stable home that
-// later binding scopes register into; callers that mutate it (Register/Clear) see
-// their changes persist. Use RebuildBindings to re-sync it after structurally
-// changing the menu tree.
+// or lazily here for a MenuBar assembled without it) and keeps a stable identity
+// across calls. A caller may Register an extra binding on it and it persists across
+// Registry() calls, but only until the next RebuildBindings, which resets the
+// registry to the menu bindings (see RebuildBindings). Use RebuildBindings to
+// re-sync after structurally changing the menu tree.
 func (m *MenuBar) Registry() *BindingRegistry {
 	if m.registry == nil {
 		m.RebuildBindings()
