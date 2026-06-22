@@ -11,15 +11,16 @@ package tv
 //
 //   - MinW, MinH: absolute floor the dialog never shrinks below (e.g. 40×10). 0 = no floor.
 //   - MaxW, MaxH: absolute cap the dialog never grows past. 0 = cap at screen − 2*Margin.
-//   - PreferredW, PrefH: the content-driven ideal, treated as a *preferred minimum*
-//     that competes with the percentage default — the larger of the two wins. A
-//     value below the default (80% wide / 85% tall) is therefore ignored; to make a
-//     dialog smaller than the default, cap it with MaxW/MaxH. 0 = use the default.
+//   - PreferredW, PrefH: the content-driven ideal. It is honoured even when smaller
+//     than the percentage default (80% wide / 85% tall), which acts as an upper
+//     *cap*, not a floor — so a dialog sizes to its content and only fills the
+//     default share of the screen when it leaves these at 0. 0 = use the default.
 //   - Margin: breathing room kept clear on each side. 0 = the default of 2.
 //
-// The behavioral default is "be large": a dialog fills ~80%×85% of the terminal and
-// only becomes small when content (a small PreferredW/PrefH) or an explicit Max
-// forces it to.
+// A dialog with no content opinion (PreferredW/PrefH left at 0) fills ~80%×85% of
+// the terminal; one that declares a content-driven preferred size is sized to that
+// (down to the Min floor), with the percentage acting as the upper bound so it
+// never grows absurdly large (#309).
 type DialogSpec struct {
 	MinW, MinH        int
 	MaxW, MaxH        int
@@ -32,9 +33,9 @@ type DialogSpec struct {
 const DefaultDialogMargin = 2
 
 const (
-	// dialogWidthPercent and dialogHeightPercent are the share of the terminal a
-	// dialog fills by default — the inversion that kills the cramped feeling: large
-	// by default, shrunk only by content or an explicit cap.
+	// dialogWidthPercent and dialogHeightPercent are the largest share of the
+	// terminal a dialog grows to: the cap a content-driven preferred size is bounded
+	// by, and the size used when a spec declares no preferred size at all (#309).
 	dialogWidthPercent  = 80
 	dialogHeightPercent = 85
 )
@@ -44,8 +45,8 @@ const (
 // size (w, h).
 //
 // Policy:
-//  1. The preferred size defaults to a percentage of the screen (80% wide, 85%
-//     tall) unless the spec asks for a larger PreferredW/PrefH.
+//  1. The size is the spec's PreferredW/PrefH, capped at a percentage of the screen
+//     (80% wide, 85% tall); a zero preferred falls back to that percentage (#309).
 //  2. That size is clamped to [Min, min(effectiveMax, screen − 2*Margin)], where
 //     effectiveMax is the spec's Max when set and otherwise screen − 2*Margin. The
 //     Min floor is applied last, so a dialog on a tiny terminal honours its floor
@@ -70,12 +71,19 @@ func ResolveDialogRect(spec DialogSpec, screenW, screenH int) (x, y, w, h int) {
 	return x, y, w, h
 }
 
-// resolveDimension applies the width/height policy to one axis: take the larger of
-// the caller's preferred size and the percentage default, clamp it down to
-// min(effectiveMax, screen − 2*margin), then floor it to the minimum.
+// resolveDimension applies the width/height policy to one axis: start from the
+// caller's preferred size (or the percentage default when it is 0), cap it at the
+// percentage default and at min(effectiveMax, screen − 2*margin), then floor it to
+// the minimum. The percentage is a ceiling the content grows toward, not a floor it
+// is forced up to (#309).
 func resolveDimension(preferred, percentDefault, minV, maxV, screen, margin int) int {
 	value := preferred
-	if percentDefault > value {
+	if value <= 0 {
+		value = percentDefault
+	}
+	// The percentage default is an upper cap on a content-driven preferred size, so
+	// a small dialog keeps its content size instead of inflating to the default.
+	if percentDefault > 0 && value > percentDefault {
 		value = percentDefault
 	}
 	upper := maxV

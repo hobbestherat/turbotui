@@ -36,22 +36,28 @@ func TestResolveDialogRect(t *testing.T) {
 			wantW: 100, wantH: 30, wantX: 50, wantY: 10,
 		},
 		{
-			name:    "screen minus 2 margin caps a huge preferred size",
+			// A huge preferred is capped to the percentage default (40×17) before the
+			// screen−2*margin cap (46×16); height then clamps to the margin cap (#309).
+			name:    "percentage default caps a huge preferred size",
 			spec:    DialogSpec{PreferredW: 1000, PrefH: 1000},
 			screenW: 50, screenH: 20,
-			wantW: 46, wantH: 16, wantX: 2, wantY: 2,
+			wantW: 40, wantH: 16, wantX: 5, wantY: 2,
 		},
 		{
-			name:    "preferred larger than percentage wins (under the cap)",
+			// Preferred above the percentage default is capped DOWN to it (#309): the
+			// percentage is a ceiling, not something a larger preferred overrides.
+			name:    "preferred above the percentage default is capped to it",
 			spec:    DialogSpec{PreferredW: 90, PrefH: 35},
 			screenW: 100, screenH: 40,
-			wantW: 90, wantH: 35, wantX: 5, wantY: 2,
+			wantW: 80, wantH: 34, wantX: 10, wantY: 3,
 		},
 		{
-			name:    "small preferred does NOT shrink below percentage default",
+			// The key #309 inversion: a small content-driven preferred is HONOURED
+			// (the percentage is a cap, not a floor) instead of inflating to 80%×85%.
+			name:    "small preferred is honoured (percentage is a cap, not a floor)",
 			spec:    DialogSpec{PreferredW: 30, PrefH: 5},
 			screenW: 100, screenH: 40,
-			wantW: 80, wantH: 34, wantX: 10, wantY: 3,
+			wantW: 30, wantH: 5, wantX: 35, wantY: 17,
 		},
 		{
 			name:    "custom margin widens the side gap",
@@ -77,6 +83,27 @@ func TestResolveDialogRect(t *testing.T) {
 	}
 }
 
+// TestResolveDialogRectPercentIsCapNotFloor pins the #309 contract that the gogent
+// dialog specs rely on: a content-driven preferred size below the percentage
+// default is honoured (a one-line confirm no longer inflates to 80%×85%), while a
+// spec with no preferred opinion still fills the default share so the big dialogs
+// (browsers, statistics, theme editor) keep their size.
+func TestResolveDialogRectPercentIsCapNotFloor(t *testing.T) {
+	// Small content-driven dialog on a roomy terminal: sized to content, not 160×42.
+	_, _, w, h := ResolveDialogRect(DialogSpec{MinW: 30, MinH: 7, PreferredW: 44, PrefH: 9, MaxW: 80, MaxH: 24}, 200, 50)
+	if w != 44 || h != 9 {
+		t.Fatalf("small content dialog = %dx%d, want 44x9 (preferred honoured, not inflated)", w, h)
+	}
+	if w == 160 && h == 42 {
+		t.Fatal("small content dialog still inflated to the percentage default (regression)")
+	}
+	// No preferred opinion: still fills the percentage default (big dialogs unchanged).
+	_, _, bw, bh := ResolveDialogRect(DialogSpec{MinW: 40, MinH: 10}, 200, 50)
+	if bw != 160 || bh != 42 {
+		t.Fatalf("preferred-less dialog = %dx%d, want 160x42 (percentage default)", bw, bh)
+	}
+}
+
 // TestResolveDialogRectMarginDefault checks that a zero Margin behaves exactly as
 // Margin == DefaultDialogMargin (the documented fallback).
 func TestResolveDialogRectMarginDefault(t *testing.T) {
@@ -90,9 +117,11 @@ func TestResolveDialogRectMarginDefault(t *testing.T) {
 		t.Fatalf("Margin=0 gave (%d,%d,%d,%d) but Margin=%d gave (%d,%d,%d,%d)",
 			x0, y0, w0, h0, DefaultDialogMargin, x1, y1, w1, h1)
 	}
-	// And concretely: cap is screen-2*default = 56 x 20.
-	if w0 != 56 || h0 != 20 {
-		t.Fatalf("default-margin cap = %dx%d, want 56x20", w0, h0)
+	// And concretely: a huge preferred is capped to the percentage default (80% of
+	// 60 = 48 wide), which is below the 56-wide screen−2*margin cap; height's
+	// percentage default (85% of 24 = 20) equals the margin cap (#309).
+	if w0 != 48 || h0 != 20 {
+		t.Fatalf("default-margin cap = %dx%d, want 48x20", w0, h0)
 	}
 }
 
