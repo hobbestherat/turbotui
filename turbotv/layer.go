@@ -41,6 +41,13 @@ func NewLayer(name string, root Widget, acceptInput bool, fullScreen bool) *Laye
 			window.layer = layer
 		}
 	}
+	// An auto-sized dialog re-resolves its rect against the new terminal size when
+	// the desktop reports a resize, so an open dialog stays ~80%×85% of the screen
+	// instead of remaining a fixed box on a now-larger terminal. Callers may still
+	// override OnResize afterwards for non-auto layouts.
+	if dialog, ok := root.(*Dialog); ok && dialog.autoSpec != nil {
+		layer.OnResize = func(Rect) { dialog.reflow() }
+	}
 	return layer
 }
 

@@ -839,69 +839,9 @@ func (t *TextView) page() int {
 // each tab to a single break.
 const textViewTabWidth = 8
 
-// wrapText breaks text into segments no wider than width runes, preserving the
-// inter-word whitespace — leading indentation and internal runs of spaces — that
-// a naive strings.Fields pass would discard or collapse. Tabs are first expanded
-// to tab stops. Tokens (words or whitespace runs) longer than width are
-// hard-split; a line that fits whole is emitted verbatim, so the displayed text
-// matches the source.
-func wrapText(text string, width int) []string {
-	if width < 1 {
-		width = 1
-	}
-	if text == "" {
-		return []string{""}
-	}
-	text = expandTabs(text, textViewTabWidth)
-	var rows []string
-	line := make([]rune, 0, width)
-	flush := func() {
-		rows = append(rows, string(line))
-		line = line[:0]
-	}
-	// place lays content (leading indentation or a word) onto the current line,
-	// breaking when full and hard-splitting a token wider than a whole line.
-	place := func(runes []rune) {
-		for len(runes) > 0 {
-			room := width - len(line)
-			if room <= 0 {
-				flush()
-				continue
-			}
-			if len(runes) <= room {
-				line = append(line, runes...)
-				return
-			}
-			if len(line) > 0 {
-				flush()
-				continue
-			}
-			line = append(line, runes[:width]...)
-			runes = runes[width:]
-			flush()
-		}
-	}
-	first := true
-	for _, token := range tokenizeWhitespace(text) {
-		runes := []rune(token)
-		if token[0] == ' ' && !first {
-			// Internal whitespace: keep a run of spaces when it still fits on the
-			// current line so alignment survives; otherwise let it be absorbed by
-			// the line break instead of carrying a lone separator to the next row.
-			if len(line) > 0 && len(runes) <= width-len(line) {
-				line = append(line, runes...)
-			} else if len(line) > 0 {
-				flush()
-			}
-		} else {
-			// Leading indentation (the first token) and words are content.
-			place(runes)
-		}
-		first = false
-	}
-	flush()
-	return rows
-}
+// wrapText is the unexported alias kept for in-package call sites; the canonical
+// implementation is WrapText in measure.go.
+func wrapText(text string, width int) []string { return WrapText(text, width) }
 
 // drawStyledRow paints a styled visual row one span at a time, giving each span its
 // own foreground, background, bold, underline and italic, clipped to limit terminal

@@ -10,6 +10,13 @@ import tui "github.com/hobbestherat/turbotui"
 // for ready-made dialogs.
 type Dialog struct {
 	Window *Window
+	// autoSpec, when non-nil, is the sizing intent of a dialog created with
+	// NewAutoDialog or last passed to Fit. It lets the dialog re-resolve its rect
+	// against the current screen — both for Fit and for terminal-resize reflow.
+	autoSpec *DialogSpec
+	// desktop is the desktop this dialog was sized against (set by NewAutoDialog),
+	// used by Fit before the dialog's window has been wired to a desktop via a layer.
+	desktop *Desktop
 }
 
 // NewDialog creates a dialog-themed window at (x, y) with the given size. The
@@ -82,3 +89,63 @@ func (d *Dialog) SetDefaultCancelButtons(buttons ...*Button) {
 // windowRef satisfies hasWindow so adding a Dialog to a layer wires the
 // underlying window to its layer and desktop (for Close and constraints).
 func (d *Dialog) windowRef() *Window { return d.Window }
+
+// NewAutoDialog creates a dialog sized by spec against the desktop's current
+// terminal size, rather than by hand-computed (x, y, w, h). It resolves the rect
+// with ResolveDialogRect from desktop.App().Width()/Height() and forwards to
+// NewDialog, so the dialog defaults to ~80%×85% of the terminal and shrinks only
+// when the spec's content size or caps demand it. The spec is remembered so the
+// open dialog re-resolves itself when the terminal is resized (see NewLayer's
+// resize wiring). desktop must be non-nil — there is no global app to read the
+// screen size from.
+func NewAutoDialog(desktop *Desktop, title string, spec DialogSpec) *Dialog {
+	if desktop == nil {
+		return nil
+	}
+	x, y, w, h := ResolveDialogRect(spec, desktop.App().Width(), desktop.App().Height())
+	dialog := NewDialog(title, x, y, w, h)
+	dialog.autoSpec = &spec
+	dialog.desktop = desktop
+	return dialog
+}
+
+// Fit resizes an existing dialog to spec against the current terminal, centering
+// it. Use it to add and measure content first, then grow the dialog to suit:
+// resolve once with ResolveDialogRect and apply the new bounds via
+// Window.Component.SetBounds, which re-runs the window LayoutFn so the content area
+// is re-inset. The spec is remembered so a later terminal resize re-resolves it.
+//
+// Fit needs a desktop to read the screen size: either the dialog was created with
+// NewAutoDialog, or it has been added to a desktop via a layer. It is a no-op
+// otherwise.
+func (d *Dialog) Fit(spec DialogSpec) {
+	d.autoSpec = &spec
+	d.reflow()
+}
+
+// resolveDesktop returns the desktop this dialog should size against — the one it
+// was constructed with, or the one its window was wired to when added to a layer.
+func (d *Dialog) resolveDesktop() *Desktop {
+	if d.desktop != nil {
+		return d.desktop
+	}
+	if d.Window != nil {
+		return d.Window.desktop
+	}
+	return nil
+}
+
+// reflow re-resolves the dialog's rect from its remembered spec against the current
+// terminal size and applies it. It is the shared body of Fit and the resize hook,
+// and a no-op until the dialog has both a spec and a desktop.
+func (d *Dialog) reflow() {
+	if d.autoSpec == nil || d.Window == nil {
+		return
+	}
+	desktop := d.resolveDesktop()
+	if desktop == nil {
+		return
+	}
+	x, y, w, h := ResolveDialogRect(*d.autoSpec, desktop.App().Width(), desktop.App().Height())
+	d.Window.Component.SetBounds(Rect{X: x, Y: y, W: w, H: h})
+}
