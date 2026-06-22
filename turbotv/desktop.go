@@ -131,6 +131,18 @@ func (d *Desktop) SetMenuBar(bar *MenuBar) {
 	}
 }
 
+// Bindings returns the registry of key bindings the desktop currently consults for
+// menu accelerators, built from the active menubar's menu tree, or nil when no
+// menubar is set. It is the toolkit's first-class view of "which chord triggers
+// which action" and the seam later binding scopes hang off; it does not change the
+// dispatch chain in handleType (only MenuBar.HandleAccelerator consults it).
+func (d *Desktop) Bindings() *BindingRegistry {
+	if d.menuBar == nil {
+		return nil
+	}
+	return d.menuBar.Registry()
+}
+
 // AddLayer pushes a layer onto the top of the stack. Must be called on the event
 // loop or via Post (see the Desktop threading contract).
 func (d *Desktop) AddLayer(layer *Layer) {
