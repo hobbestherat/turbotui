@@ -687,6 +687,54 @@ func (m *MultiLineInput) caretSpanOffsetCol(lineIndex, cursorX, width int) (int,
 	return last, cursorX - spans[last].start
 }
 
+// CaretRowInLine reports the caret's visual-row offset within its own logical
+// line and the number of visual rows that line occupies, using the widget's
+// actual wrap layout (honouring WordWrap) at its current rendered content width.
+// Width is taken from the widget's own bounds, so it always matches what draw
+// renders. It lets a host decide whether Up/Down should move the caret within a
+// wrapped line or fall through (e.g. recall history) when the caret is on the
+// first/last visual row — without re-deriving wrap geometry with char-wrap
+// assumptions. (gogent#270)
+func (m *MultiLineInput) CaretRowInLine() (rowInLine int, rowsInLine int) {
+	width := 1
+	if root := m.Root(); root != nil {
+		width = m.contentWidth(root.AbsoluteBounds().W)
+	}
+	if width < 1 {
+		width = 1
+	}
+	if len(m.Lines) == 0 {
+		return 0, 1
+	}
+	y := m.CursorY
+	if y < 0 {
+		y = 0
+	}
+	if y >= len(m.Lines) {
+		y = len(m.Lines) - 1
+	}
+	rowsInLine = m.rowsForLine(m.Lines[y], width)
+	x := m.CursorX
+	if x < 0 {
+		x = 0
+	}
+	if n := len([]rune(m.Lines[y])); x > n {
+		x = n
+	}
+	if m.WordWrap {
+		rowInLine, _ = m.caretSpanOffsetCol(y, x, width)
+	} else {
+		rowInLine = x / width
+	}
+	if rowInLine < 0 {
+		rowInLine = 0
+	}
+	if rowInLine >= rowsInLine {
+		rowInLine = rowsInLine - 1
+	}
+	return rowInLine, rowsInLine
+}
+
 func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
 	if width < 1 {
 		width = 1
