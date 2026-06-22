@@ -27,11 +27,13 @@ const (
 )
 
 // Cascade stagger: the per-window (dx, dy) offset, just wide/tall enough to expose
-// a trailing window's left border + title text and one title-bar row, matching the
-// classic Turbo Pascal cascade.
+// a trailing window's left border + title text and its full title bar. The vertical
+// step clears the previous window's title bar (row 0) plus its top border so each
+// title bar stays fully visible without overwriting the window below's first content
+// row — the classic Turbo Pascal cascade look.
 const (
 	cascadeStepX = 2
-	cascadeStepY = 1
+	cascadeStepY = 2
 )
 
 // TileRects is pure geometry: it returns the rects that tile area for n windows
