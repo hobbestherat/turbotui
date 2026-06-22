@@ -78,8 +78,8 @@ func (t *TextBox) draw(component *VisualComponent, surface Surface) {
 		cell := textStyle
 		cell.Ch = t.Text[index]
 		if index >= selLo && index < selHi {
-			cell.FG = activeTheme.SelectionFG
-			cell.BG = activeTheme.SelectionBG
+			cell.FG = activeTheme.TextSelectionFG
+			cell.BG = activeTheme.TextSelectionBG
 		}
 		surface.SetCell(abs.X+offset, abs.Y, cell)
 	}
