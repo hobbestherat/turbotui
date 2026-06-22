@@ -131,11 +131,13 @@ func (d *Desktop) SetMenuBar(bar *MenuBar) {
 	}
 }
 
-// Bindings returns the registry of key bindings the desktop currently consults for
-// menu accelerators, built from the active menubar's menu tree, or nil when no
-// menubar is set. It is the toolkit's first-class view of "which chord triggers
-// which action" and the seam later binding scopes hang off; it does not change the
-// dispatch chain in handleType (only MenuBar.HandleAccelerator consults it).
+// Bindings returns the active menubar's persistent BindingRegistry — the single
+// instance the desktop consults for menu accelerators — or nil when no menubar is
+// set. It is the toolkit's first-class view of "which chord triggers which action"
+// and the stable seam later binding scopes register into; it does not change the
+// dispatch chain in handleType (only MenuBar.HandleAccelerator consults it). The
+// returned registry is owned by the menubar and is re-synced from the menu tree by
+// MenuBar.RebuildBindings.
 func (d *Desktop) Bindings() *BindingRegistry {
 	if d.menuBar == nil {
 		return nil
