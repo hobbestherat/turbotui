@@ -46,9 +46,26 @@ func drawMnemonicClipped(surface Surface, x int, y int, label string, maxWidth i
 	surface.WriteString(x, y, text, style)
 	if highlight && hot >= 0 && hot < prefixRunes {
 		col := x + tui.StringWidth(string(cleanRunes[:hot]))
-		surface.SetCell(col, y, tui.Cell{Ch: cleanRunes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+		surface.SetCell(col, y, tui.Cell{Ch: cleanRunes[hot], FG: mnemonicHotFG(hotFG, style), BG: style.BG, Bold: true, Underline: true})
 	}
 	return tui.StringWidth(text)
+}
+
+// mnemonicHotFG returns the colour to paint the mnemonic hot character in. It is
+// normally hotFG (the theme's advertised hot-key colour), but when hotFG is
+// structurally identical to the background it would be drawn over, the letter
+// would render invisibly (e.g. a theme whose accent doubles as both MenuHotFG and
+// the selected-row MenuSelectBG — accent-on-accent). In that case it falls back to
+// the label's own foreground (style.FG), which the caller already chose to be
+// legible on style.BG, while keeping Bold/Underline so the mnemonic affordance
+// survives. The guard fires only on exact equality — when the letter would truly
+// vanish — not on merely low contrast, so an intentionally subtle mnemonic hue is
+// left untouched.
+func mnemonicHotFG(hotFG tui.Color, style tui.Cell) tui.Color {
+	if hotFG == style.BG {
+		return style.FG
+	}
+	return hotFG
 }
 
 // parseMnemonic strips the '&' mnemonic marker from a label and returns the clean
@@ -101,7 +118,7 @@ func drawMnemonic(surface Surface, x int, y int, label string, style tui.Cell, h
 	// display width of everything before it so a leading double-width (CJK) or
 	// combining rune doesn't shift the highlight onto the wrong cell.
 	col := x + tui.StringWidth(string(runes[:hot]))
-	surface.SetCell(col, y, tui.Cell{Ch: runes[hot], FG: hotFG, BG: style.BG, Bold: true, Underline: true})
+	surface.SetCell(col, y, tui.Cell{Ch: runes[hot], FG: mnemonicHotFG(hotFG, style), BG: style.BG, Bold: true, Underline: true})
 }
 
 // unicodeLower folds a rune to lower case for mnemonic matching. It uses
