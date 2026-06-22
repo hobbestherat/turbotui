@@ -50,11 +50,14 @@ type Tree struct {
 	// the selection changes.
 	OnActivate func(*TreeNode)
 	OnSelect   func(*TreeNode)
-	// OnSelectMouse fires only when a mouse click sets or changes the selection,
-	// reporting the clicked node. It is additive to OnSelect (which still fires
-	// for both clicks and keyboard moves): use OnSelectMouse to tell a pointer
-	// click apart from keyboard traversal without altering OnSelect/OnActivate
-	// semantics. It never fires from keyboard navigation; when nil the widget
+	// OnSelectMouse fires on a mouse click that selects a row, reporting the
+	// clicked node (it fires on every in-bounds row click, including a re-click of
+	// the already-selected row, mirroring OnSelect's click behaviour). It is
+	// additive to OnSelect (which still fires for both clicks and keyboard moves):
+	// use OnSelectMouse to tell a pointer click apart from keyboard traversal
+	// without altering OnSelect/OnActivate semantics. The reported node is the row
+	// actually clicked, even if an OnSelect handler reentrantly moves the
+	// selection. It never fires from keyboard navigation; when nil the widget
 	// behaves exactly as before.
 	OnSelectMouse func(*TreeNode)
 
@@ -289,12 +292,15 @@ func (t *Tree) fireSelect(rows []treeRow) {
 	}
 }
 
-// fireSelectMouse notifies OnSelectMouse for the current selection. It is called
-// only from the mouse-click path so hosts can act on a pointer click without
-// reacting to keyboard traversal; the keyboard path never invokes it.
-func (t *Tree) fireSelectMouse(rows []treeRow) {
-	if t.OnSelectMouse != nil && t.selected >= 0 && t.selected < len(rows) {
-		t.OnSelectMouse(rows[t.selected].node)
+// fireSelectMouse notifies OnSelectMouse of the clicked node. It is called only
+// from the mouse-click path so hosts can act on a pointer click without reacting
+// to keyboard traversal; the keyboard path never invokes it. It takes the node
+// directly rather than re-reading t.selected, so a host's OnSelect that
+// reentrantly moves the selection (e.g. a focus snap-back via SelectNode) cannot
+// redirect OnSelectMouse to a different row than the one clicked.
+func (t *Tree) fireSelectMouse(node *TreeNode) {
+	if t.OnSelectMouse != nil {
+		t.OnSelectMouse(node)
 	}
 }
 func (t *Tree) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
@@ -403,10 +409,14 @@ func (t *Tree) handleClick(component *VisualComponent, event tui.ClickEvent) boo
 		r.node.Expanded = !r.node.Expanded
 		toggledMarker = true
 	}
+	// Capture the clicked node before OnSelect runs: a host's OnSelect may
+	// reentrantly move the selection (e.g. a focus snap-back via SelectNode), and
+	// OnSelectMouse must still report the row the user actually clicked.
+	clicked := r.node
 	t.fireSelect(rows)
 	// OnSelectMouse fires alongside OnSelect, but only here on the click path, so
 	// hosts can distinguish a pointer click from keyboard traversal.
-	t.fireSelectMouse(rows)
+	t.fireSelectMouse(clicked)
 	// A click on an already-selected row (not on its expand marker) also
 	// activates it, so callers can open/preview an item on a repeat click in
 	// addition to Enter.
