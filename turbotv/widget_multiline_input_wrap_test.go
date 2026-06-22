@@ -19,7 +19,7 @@ func TestWordWrapSpansContiguousAndLossless(t *testing.T) {
 		{"hello world foo", 8, []string{"hello ", "world ", "foo"}},
 		{"hello world", 8, []string{"hello ", "world"}},
 		{"abcdefgh", 4, []string{"abcd", "efgh"}}, // single long word hard-splits
-		{"ab cd", 10, []string{"ab cd"}},           // fits on one row
+		{"ab cd", 10, []string{"ab cd"}},          // fits on one row
 		{"a b c d e", 3, []string{"a ", "b ", "c ", "d e"}},
 		{"", 4, []string{""}},
 	}
@@ -188,9 +188,14 @@ func TestMultiLineSelectionFillsTail(t *testing.T) {
 	// Select from line 0 col 1 through line 2 col 1 (spans all three lines).
 	m.selAnchorY, m.selAnchorX = 0, 1
 	m.CursorY, m.CursorX = 2, 1
+	// Focus the input: text selection is only created/edited while focused, and the
+	// selection background (TextSelectionBG) is chosen to contrast with the FOCUSED
+	// fill (InputFocusBG), not the resting InputBG — so the distinction is only
+	// observable on a focused field (gogent#279).
+	m.Component.hasFocus = true
 	app := drawInput(t, m, 6, 5)
 
-	selBG := activeTheme.SelectionBG
+	selBG := activeTheme.TextSelectionBG // input text selection (gogent#279)
 	// Line 0 (start line): the blank tail after "ab" must carry the selection BG
 	// up to the text width (cols 2..4; col 5 is the scrollbar column).
 	if bg := app.ReadCell(2, 0).BG; bg != selBG {

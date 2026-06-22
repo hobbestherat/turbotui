@@ -39,6 +39,12 @@ type Theme struct {
 	DialogMnemonicFG tui.Color
 	SelectionBG      tui.Color
 	SelectionFG      tui.Color
+	// TextSelectionBG/FG paint selected text INSIDE inputs (TextBox/MultiLineInput),
+	// kept distinct from SelectionBG/FG (which drive dropdown-popup and menu
+	// highlights). Text selection is drawn over the focused input fill, so it must
+	// contrast with InputFocusBG rather than reuse the accent (gogent#279).
+	TextSelectionBG tui.Color
+	TextSelectionFG tui.Color
 	// Menu chrome. The menubar is always-on-top so it gets first-class fields
 	// rather than literal constants.
 	MenuBarFG    tui.Color
@@ -84,6 +90,8 @@ var DefaultTheme = Theme{
 	DialogMnemonicFG: tui.ANSIColor(1),  // dark red: high contrast on light grey
 	SelectionBG:      tui.ANSIColor(7),
 	SelectionFG:      tui.ANSIColor(0),
+	TextSelectionBG:  tui.ANSIColor(0),  // black: inverts the cyan focused-input fill
+	TextSelectionFG:  tui.ANSIColor(15), // bright white
 	MenuBarFG:        tui.ANSIColor(0),
 	MenuBarBG:        tui.ANSIColor(7),
 	MenuHotFG:        tui.ANSIColor(1), // dark red on light grey
@@ -126,6 +134,8 @@ var HighContrastTheme = Theme{
 	DialogMnemonicFG: tui.ANSIColor(11),
 	SelectionBG:      tui.ANSIColor(15),
 	SelectionFG:      tui.ANSIColor(0),
+	TextSelectionBG:  tui.ANSIColor(0),  // black: inverts the white focused-input fill
+	TextSelectionFG:  tui.ANSIColor(15), // white
 	MenuBarFG:        tui.ANSIColor(15),
 	MenuBarBG:        tui.ANSIColor(0),
 	MenuHotFG:        tui.ANSIColor(11),

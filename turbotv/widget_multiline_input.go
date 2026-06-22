@@ -140,8 +140,8 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 			cell := style
 			cell.Ch = wrapped.runes[col]
 			if m.isSelected(wrapped.line, wrapped.start+col) {
-				cell.FG = activeTheme.SelectionFG
-				cell.BG = activeTheme.SelectionBG
+				cell.FG = activeTheme.TextSelectionFG
+				cell.BG = activeTheme.TextSelectionBG
 			}
 			surface.SetCell(abs.X+col, abs.Y+row, cell)
 		}
@@ -153,8 +153,8 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 			}
 			surface.SetCell(abs.X+col, abs.Y+row, tui.Cell{
 				Ch: ' ',
-				FG: activeTheme.SelectionFG,
-				BG: activeTheme.SelectionBG,
+				FG: activeTheme.TextSelectionFG,
+				BG: activeTheme.TextSelectionBG,
 			})
 		}
 	}
