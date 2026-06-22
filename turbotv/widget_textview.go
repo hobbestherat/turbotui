@@ -614,10 +614,21 @@ func (t *TextView) metrics(abs Rect) ([]renderRow, int, bool) {
 	return rows, textWidth, bar
 }
 
+// clampScroll bounds scrollY to the valid range for the current row count and
+// viewport height. While following the bottom, it also re-anchors scrollY *up*
+// to maxScroll, not just clamps it down: a plain clamp only reduces scrollY, so a
+// viewport resize (or any change that raises maxScroll without going through
+// touch's 1<<30 sentinel) would leave a following view stranded above the new last
+// line. Re-anchoring here — clampScroll runs on every draw — makes "follow the
+// bottom" hold across resizes, not only across content changes. When not following
+// (the user scrolled up) scrollY is preserved and merely clamped into range.
 func (t *TextView) clampScroll(total int, height int) {
 	maxScroll := total - height
 	if maxScroll < 0 {
 		maxScroll = 0
+	}
+	if t.follow {
+		t.scrollY = maxScroll
 	}
 	if t.scrollY > maxScroll {
 		t.scrollY = maxScroll
