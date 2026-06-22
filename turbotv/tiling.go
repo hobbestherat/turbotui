@@ -19,6 +19,19 @@ const (
 	// row-major; a partially filled final row stretches its cells across the full
 	// width so the tiles always partition the area with no gaps.
 	TileGrid
+	// TileCascade overlaps the windows in a diagonal stack (Turbo Pascal style):
+	// every window shares one size and is offset by a small per-window stagger from
+	// the top-left, so all title bars fan out and stay visible while the front
+	// window stays large. Unlike Rows/Columns/Grid the rects OVERLAP by design.
+	TileCascade
+)
+
+// Cascade stagger: the per-window (dx, dy) offset, just wide/tall enough to expose
+// a trailing window's left border + title text and one title-bar row, matching the
+// classic Turbo Pascal cascade.
+const (
+	cascadeStepX = 2
+	cascadeStepY = 1
 )
 
 // TileRects is pure geometry: it returns the rects that tile area for n windows
@@ -39,6 +52,25 @@ func TileRects(layout TileLayout, area Rect, n int) (rects []Rect, cols, rows in
 	}
 
 	switch layout {
+	case TileCascade:
+		// Overlapping diagonal stack. Every window shares one size; window i is
+		// offset by i*(stepX, stepY) from the top-left. The total fan offset is
+		// capped at half the area on each axis so the shared window stays usable and,
+		// combined with clamping each window's offset to that cap, every rect stays
+		// fully inside area (no title bar lost off-screen) even for large n — at the
+		// cost of the trailing few overlapping once the cap is reached.
+		cols, rows = 1, n
+		offX := capOffset((n-1)*cascadeStepX, area.W/2)
+		offY := capOffset((n-1)*cascadeStepY, area.H/2)
+		w := atLeastOne(area.W - offX)
+		h := atLeastOne(area.H - offY)
+		rects = make([]Rect, n)
+		for i := 0; i < n; i++ {
+			dx := capOffset(i*cascadeStepX, offX)
+			dy := capOffset(i*cascadeStepY, offY)
+			rects[i] = Rect{X: area.X + dx, Y: area.Y + dy, W: w, H: h}
+		}
+
 	case TileColumns:
 		cols, rows = n, 1
 		spans := splitSpan(area.X, area.W, n)
@@ -168,6 +200,21 @@ func intCeilSqrt(n int) int {
 func atLeastOne(v int) int {
 	if v < 1 {
 		return 1
+	}
+	return v
+}
+
+// capOffset clamps a cascade offset into [0, max], so a negative count yields 0 and
+// the fan never advances past its cap (keeping every window inside the work area).
+func capOffset(v, max int) int {
+	if max < 0 {
+		max = 0
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
 	}
 	return v
 }
