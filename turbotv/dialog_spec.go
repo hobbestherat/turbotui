@@ -11,8 +11,10 @@ package tv
 //
 //   - MinW, MinH: absolute floor the dialog never shrinks below (e.g. 40×10). 0 = no floor.
 //   - MaxW, MaxH: absolute cap the dialog never grows past. 0 = cap at screen − 2*Margin.
-//   - PreferredW, PrefH: the content-driven ideal. 0 = use the percentage default
-//     (80% of the screen width / 85% of the screen height).
+//   - PreferredW, PrefH: the content-driven ideal, treated as a *preferred minimum*
+//     that competes with the percentage default — the larger of the two wins. A
+//     value below the default (80% wide / 85% tall) is therefore ignored; to make a
+//     dialog smaller than the default, cap it with MaxW/MaxH. 0 = use the default.
 //   - Margin: breathing room kept clear on each side. 0 = the default of 2.
 //
 // The behavioral default is "be large": a dialog fills ~80%×85% of the terminal and

@@ -120,6 +120,15 @@ func NewAutoDialog(desktop *Desktop, title string, spec DialogSpec) *Dialog {
 // otherwise.
 func (d *Dialog) Fit(spec DialogSpec) {
 	d.autoSpec = &spec
+	// Fit can set autoSpec after the dialog was already placed in a layer (the
+	// "build, add, fit-to-content" flow), in which case NewLayer ran before the
+	// spec existed and did not install the resize hook. Install it now so a dialog
+	// made auto-sized via Fit is just as resize-aware as one from NewAutoDialog. A
+	// caller's own OnResize is left untouched.
+	if d.Window != nil && d.Window.layer != nil && d.Window.layer.OnResize == nil {
+		dialog := d
+		d.Window.layer.OnResize = func(Rect) { dialog.reflow() }
+	}
 	d.reflow()
 }
 
