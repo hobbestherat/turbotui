@@ -124,11 +124,41 @@ func (d *Desktop) SetBackground(cell tui.Cell) {
 // on top of every layer and receives global shortcuts (Alt-mnemonics and
 // Ctrl-accelerators) and keyboard navigation while open. Do NOT also add it to a
 // layer.
+//
+// Installing a menubar re-syncs its BindingRegistry from the current menu tree, so
+// a bar whose Menus were assembled or mutated before being set is reflected on the
+// accelerator path without the caller having to call RebuildBindings. Mutating the
+// tree of an already-installed bar still requires MenuBar.RebuildBindings.
 func (d *Desktop) SetMenuBar(bar *MenuBar) {
 	d.menuBar = bar
 	if bar != nil {
 		bar.Component.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: 1})
+		bar.RebuildBindings()
 	}
+}
+
+// Bindings returns the active menubar's persistent BindingRegistry — the single
+// instance the desktop consults for menu accelerators — or nil when no menubar is
+// set. It is the toolkit's first-class view of "which chord triggers which action"
+// and the seam later binding scopes will hang off; it does not change the dispatch
+// chain in handleType (only MenuBar.HandleAccelerator consults it). The returned
+// registry is owned by the menubar and is re-synced from the menu tree by
+// MenuBar.RebuildBindings.
+//
+// Phase-1 caveat: the instance is stable, but its contents are owned by the menu
+// tree. A caller may Register an extra binding and it persists until the next
+// RebuildBindings, which resets the registry to the menu bindings and drops the
+// extra. Durable non-menu scopes (Focus/Fallthrough) are a phase-2 concern; until
+// then do not rely on a registration outliving a menu rebuild.
+//
+// Like the rest of the desktop, the registry is loop-confined: query or mutate it
+// (Match/Register/Clear) only on the event-loop goroutine or via Post, since the
+// accelerator path reads it there (see the Desktop threading contract).
+func (d *Desktop) Bindings() *BindingRegistry {
+	if d.menuBar == nil {
+		return nil
+	}
+	return d.menuBar.Registry()
 }
 
 // AddLayer pushes a layer onto the top of the stack. Must be called on the event
