@@ -68,29 +68,9 @@ func mnemonicHotFG(hotFG tui.Color, style tui.Cell) tui.Color {
 	return hotFG
 }
 
-// parseMnemonic strips the '&' mnemonic marker from a label and returns the clean
-// text plus the rune index that was marked (-1 when none). A literal '&' is
-// written as "&&".
-func parseMnemonic(label string) (string, int) {
-	runes := []rune(label)
-	out := make([]rune, 0, len(runes))
-	hotIndex := -1
-	for index := 0; index < len(runes); index++ {
-		if runes[index] == '&' && index+1 < len(runes) {
-			if runes[index+1] == '&' {
-				out = append(out, '&')
-				index++
-				continue
-			}
-			if hotIndex < 0 {
-				hotIndex = len(out)
-			}
-			continue
-		}
-		out = append(out, runes[index])
-	}
-	return string(out), hotIndex
-}
+// parseMnemonic is the unexported alias kept for in-package call sites; the
+// canonical implementation is ParseMnemonic in measure.go.
+func parseMnemonic(label string) (string, int) { return ParseMnemonic(label) }
 
 // labelMnemonic returns the lowercased mnemonic rune of a label, or 0 when none.
 func labelMnemonic(label string) rune {

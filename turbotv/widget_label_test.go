@@ -8,10 +8,10 @@ import (
 )
 
 // rowsText flattens wrapped rows back to their text for compact comparison.
-func rowsText(rows []labelRow) []string {
+func rowsText(rows []LabelRow) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
-		out[i] = string(r.runes)
+		out[i] = string(r.Runes)
 	}
 	return out
 }
@@ -34,7 +34,7 @@ func TestWrapLabelRunes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rowsText(wrapLabelRunes([]rune(tc.text), tc.width))
+			got := rowsText(WrapLabelRunes([]rune(tc.text), tc.width))
 			if len(got) != len(tc.want) {
 				t.Fatalf("wrap %q width %d = %v (rows=%d), want %v (rows=%d)",
 					tc.text, tc.width, got, len(got), tc.want, len(tc.want))
@@ -54,17 +54,17 @@ func TestWrapLabelRunes(t *testing.T) {
 // index map onto a row after wrapping.
 func TestWrapLabelRunesPreservesRuneOffsets(t *testing.T) {
 	clean := []rune("hello world foo")
-	rows := wrapLabelRunes(clean, 7)
+	rows := WrapLabelRunes(clean, 7)
 	wantStarts := []int{0, 6, 12}
 	if len(rows) != len(wantStarts) {
 		t.Fatalf("got %d rows, want %d: %v", len(rows), len(wantStarts), rowsText(rows))
 	}
 	for i, r := range rows {
-		if r.start != wantStarts[i] {
-			t.Fatalf("row %d start = %d, want %d", i, r.start, wantStarts[i])
+		if r.Start != wantStarts[i] {
+			t.Fatalf("row %d start = %d, want %d", i, r.Start, wantStarts[i])
 		}
 		// The slice must be the actual source bytes at that offset.
-		if string(r.runes) != string(clean[r.start:r.start+len(r.runes)]) {
+		if string(r.Runes) != string(clean[r.Start:r.Start+len(r.Runes)]) {
 			t.Fatalf("row %d runes are not a contiguous slice of the source", i)
 		}
 	}

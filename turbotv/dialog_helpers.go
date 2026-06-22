@@ -48,8 +48,8 @@ func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult f
 	}
 
 	// Height: one row per wrapped message line, a blank row, and the button row,
-	// inside the border. wrapLabelRunes mirrors how the Label itself wraps.
-	lineCount := len(wrapLabelRunes([]rune(message), width-2-2*hPad))
+	// inside the border. WrapLabelRunes mirrors how the Label itself wraps.
+	lineCount := len(WrapLabelRunes([]rune(message), width-2-2*hPad))
 	if lineCount < 1 {
 		lineCount = 1
 	}
