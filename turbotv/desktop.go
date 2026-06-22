@@ -31,7 +31,13 @@ type Desktop struct {
 	menuBar        *MenuBar
 	unhandledKeyFn func(event tui.TypeEvent)
 	onResize       []func()
-	workArea       Rect
+	// onActiveLayerChange is fired when the top input layer changes; lastNotifiedTop
+	// records the layer it was last reported with so a no-op mutation (raising the
+	// already-top layer, a click that does not reorder, a removal below the top)
+	// does not fire it (issue #304 / gogent#304).
+	onActiveLayerChange func(top *Layer)
+	lastNotifiedTop     *Layer
+	workArea            Rect
 	// cancel stops the run loop; it backs the default Ctrl+C quit (issue #75) and is
 	// set by Run.
 	cancel context.CancelFunc
@@ -137,6 +143,7 @@ func (d *Desktop) AddLayer(layer *Layer) {
 	if layer.FullScreen {
 		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
 	}
+	d.notifyActiveLayerChange()
 	d.Redraw()
 }
 
@@ -184,6 +191,42 @@ func (d *Desktop) OnResize(fn func()) {
 		return
 	}
 	d.onResize = append(d.onResize, fn)
+}
+
+// OnActiveLayerChange registers a callback fired (on the event loop) whenever the
+// desktop's top input layer changes — raised by a click, a programmatic
+// RaiseLayer, or an AddLayer/RemoveLayer/RemoveTopLayer that moves a different
+// layer to the top. It receives the new top layer (nil when the stack is empty).
+// It is a member of the desktop's "the desktop did something, the app may react"
+// callback family (OnResize, SetUnhandledKeyFn, per-layer OnClickOutside) and the
+// sanctioned way to re-sync state derived from the active window (e.g. a sidebar
+// selection) without instrumenting every activation path.
+//
+// The callback fires at most once per mutation and never when the top layer is
+// unchanged, so a single user gesture (a click, one mutator call) yields one
+// notification carrying the final top. It runs on the event loop, after the layer
+// stack has been updated, so a handler reading TopLayer() observes the new top.
+// Only one callback may be registered; a later call replaces it, and a nil fn
+// disables notification. Must be called on the event loop or via Post.
+func (d *Desktop) OnActiveLayerChange(fn func(top *Layer)) {
+	d.onActiveLayerChange = fn
+}
+
+// notifyActiveLayerChange fires OnActiveLayerChange when the top input layer
+// differs from the one last reported. Tracking the last-notified top dedupes
+// no-op mutations and coalesces a single gesture down to one callback with the
+// final top. It runs even when no callback is registered so that a callback
+// registered after layers already exist is not fired spuriously on the next
+// mutation. Call it on the event loop after the layer stack has been updated.
+func (d *Desktop) notifyActiveLayerChange() {
+	top := d.TopLayer()
+	if top == d.lastNotifiedTop {
+		return
+	}
+	d.lastNotifiedTop = top
+	if d.onActiveLayerChange != nil {
+		d.onActiveLayerChange(top)
+	}
 }
 
 // handleResize is the desktop's terminal-resize handler. It first clamps every
@@ -279,6 +322,7 @@ func (d *Desktop) RemoveTopLayer() {
 	d.layers = d.layers[:len(d.layers)-1]
 	d.layersMu.Unlock()
 	d.ensureFocusInTopLayer()
+	d.notifyActiveLayerChange()
 	d.Redraw()
 }
 
@@ -299,6 +343,7 @@ func (d *Desktop) RemoveLayer(layer *Layer) {
 	d.layers = next
 	d.layersMu.Unlock()
 	d.ensureFocusInTopLayer()
+	d.notifyActiveLayerChange()
 	d.Redraw()
 }
 
@@ -318,6 +363,7 @@ func (d *Desktop) TopLayer() *Layer {
 func (d *Desktop) RaiseLayer(layer *Layer) {
 	if d.raiseLayer(layer) {
 		d.ensureFocusInTopLayer()
+		d.notifyActiveLayerChange()
 		d.Redraw()
 	}
 }
@@ -526,6 +572,10 @@ func (d *Desktop) handleClick(event tui.ClickEvent) {
 				if layer := d.layerForComponent(target); layer != nil {
 					d.raiseLayer(layer)
 					d.focusIntoLayer(layer, target)
+					// The raise may have moved a new layer to the top; let the app
+					// re-sync state derived from the active window. notifyActiveLayerChange
+					// dedupes the common case where the clicked window was already on top.
+					d.notifyActiveLayerChange()
 				} else if target.Focusable {
 					d.setFocus(target)
 				}
