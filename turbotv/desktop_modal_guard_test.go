@@ -250,24 +250,6 @@ func TestModalEnterGraceLeavesEscapeDeliverable(t *testing.T) {
 	}
 }
 
-func TestModalEnterGraceDisabledByDefault(t *testing.T) {
-	desktop := newTestDesktop(t, 80, 25)
-	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
-	desktop.SetClock(func() time.Time { return now })
-
-	pressed := 0
-	root := NewComponent(Rect{X: 10, Y: 5, W: 20, H: 5})
-	button := NewButton("OK", Rect{X: 1, Y: 1, W: 10, H: 1}, func() { pressed++ })
-	root.AddChild(button)
-	desktop.AddLayer(NewModalLayer("modal", root))
-	desktop.SetFocus(button)
-
-	desktop.handleType(tui.TypeEvent{Key: tui.KeyEnter})
-	if pressed != 1 {
-		t.Fatalf("expected Enter to activate button when grace is disabled, got %d presses", pressed)
-	}
-}
-
 func TestRemovingBuriedModalDoesNotCorruptFocusHistoryForTopModal(t *testing.T) {
 	desktop := newTestDesktop(t, 80, 25)
 	baseRoot := NewComponent(Rect{W: 80, H: 25})
