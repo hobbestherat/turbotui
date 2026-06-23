@@ -255,6 +255,61 @@ func TestConflictErrorImplementsError(t *testing.T) {
 	}
 }
 
+// --- BindingFor: the read side the customizer needs (added in fixes round 1). ---
+
+func TestBindingForReturnsCurrentBinding(t *testing.T) {
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: chordCtrl('n'), ActionID: "file.new"}, nil)
+
+	got, ok := r.BindingFor("file.new")
+	if !ok {
+		t.Fatal("BindingFor must find a registered action")
+	}
+	if !got.Chord.conflictsWith(chordCtrl('n')) {
+		t.Fatalf("BindingFor chord = %v, want Ctrl+N", got.Chord)
+	}
+	// It must track Rebind: after moving the action, BindingFor reflects the new chord.
+	if err := r.Rebind("file.new", chordCtrl('f')); err != nil {
+		t.Fatalf("rebind failed: %v", err)
+	}
+	got, _ = r.BindingFor("file.new")
+	if !got.Chord.conflictsWith(chordCtrl('f')) {
+		t.Fatalf("after rebind BindingFor chord = %v, want Ctrl+F", got.Chord)
+	}
+	// Unknown action → not found.
+	if _, ok := r.BindingFor("nope"); ok {
+		t.Fatal("BindingFor must report false for an unregistered action")
+	}
+}
+
+func TestBindingForReturnsFirstWhenMultiRegistered(t *testing.T) {
+	// When an action is registered more than once, BindingFor returns the FIRST,
+	// mirroring which entry Rebind targets.
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: chordCtrl('n'), ActionID: "dup", Scope: ScopeGlobal}, nil)
+	r.Register(KeyBinding{Chord: chordCtrl('w'), ActionID: "dup", Scope: ScopeFallthrough}, nil)
+	got, ok := r.BindingFor("dup")
+	if !ok || !got.Chord.conflictsWith(chordCtrl('n')) || got.Scope != ScopeGlobal {
+		t.Fatalf("BindingFor must return the first registration: %+v ok=%v", got, ok)
+	}
+}
+
+// REGRESSION GUARD (was a FINDING): an action registered more than once must never be
+// reported as conflicting with ITSELF. Conflict exclusion is now by ActionID, not by
+// index, so rebinding one of an action's entries onto the chord held by another of its
+// OWN entries succeeds (Holder == ActionID would be a nonsensical self-conflict).
+func TestRebindMultiRegisteredActionNoSelfConflict(t *testing.T) {
+	r := NewBindingRegistry()
+	// Same action holds two Global chords (e.g. a primary + alias accelerator).
+	r.Register(KeyBinding{Chord: chordCtrl('n'), ActionID: "act", Scope: ScopeGlobal}, nil)
+	r.Register(KeyBinding{Chord: chordCtrl('w'), ActionID: "act", Scope: ScopeGlobal}, nil)
+
+	// Rebinding "act" onto Ctrl+W (held by its own second entry) must NOT self-conflict.
+	if err := r.Rebind("act", chordCtrl('w')); err != nil {
+		t.Fatalf("rebinding an action onto its own other chord must succeed, got %v", err)
+	}
+}
+
 // FINDING (non-blocking, sharp edge): conflict detection is keyed on (chord, scope)
 // and does NOT consider the Focus Target. Two ScopeFocus bindings on DISTINCT targets
 // (two different windows each binding plain 'r') are reported as conflicting even
@@ -279,25 +334,31 @@ func TestConflictForFocusIgnoresTarget(t *testing.T) {
 	}
 }
 
-// FINDING (non-blocking, sharp edge): conflictsWith compares Key exactly, so a
-// rune-only chord (Key == KeyUnknown, the wildcard form a Fallthrough binding may
-// use) is NOT detected as conflicting with the equivalent KeyRune chord even though
-// both Match the same event. Conflict detection therefore depends on chords being
-// constructed with a consistent Key axis. This pins the actual behaviour.
-func TestConflictForKeyAxisMismatchNotDetected(t *testing.T) {
-	r := NewBindingRegistry()
-	// A rune-only (wildcard-Key) binding on Ctrl+N.
-	r.Register(KeyBinding{Chord: Chord{Rune: 'n', Ctrl: true}, ActionID: "wild"}, nil)
-	// The KeyRune form of the very same combo is reported as free, despite both
-	// matching a Ctrl+N event.
-	if holder, ok := r.ConflictFor(Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}, ScopeGlobal); ok {
-		t.Fatalf("documenting actual behaviour: expected NO detected conflict across Key axes, got holder %q", holder)
-	}
-	// Both nonetheless match the same event, confirming the missed overlap is real.
+// REGRESSION GUARD (was a FINDING): a rune-only chord (Key == KeyUnknown, the wildcard
+// form) and the explicit KeyRune form of the same combo Match identical events, so the
+// conflict service must treat them as the SAME chord. The fix normalises the named-key
+// axis (effectiveKey: any rune-bearing chord constrains KeyRune) so the overlap is
+// detected regardless of how the Key field was spelled. This guard pins both directions.
+func TestConflictForNormalisesRuneKeyAxis(t *testing.T) {
+	// Both chords match a Ctrl+N event — the precondition for the conflict to be real.
 	wild := Chord{Rune: 'n', Ctrl: true}
 	keyed := Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}
 	if !wild.Matches(ctrl('n')) || !keyed.Matches(ctrl('n')) {
-		t.Fatal("both chords match a Ctrl+N event, so the undetected conflict is genuine")
+		t.Fatal("both chords must match a Ctrl+N event")
+	}
+
+	// wildcard-Key registered, KeyRune queried → conflict detected.
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: wild, ActionID: "wild"}, nil)
+	if holder, ok := r.ConflictFor(keyed, ScopeGlobal); !ok || holder != "wild" {
+		t.Fatalf("KeyRune query must conflict with the wildcard-Key binding: %q ok=%v", holder, ok)
+	}
+
+	// Symmetric: KeyRune registered, wildcard-Key queried → conflict detected.
+	r2 := NewBindingRegistry()
+	r2.Register(KeyBinding{Chord: keyed, ActionID: "keyed"}, nil)
+	if holder, ok := r2.ConflictFor(wild, ScopeGlobal); !ok || holder != "keyed" {
+		t.Fatalf("wildcard-Key query must conflict with the KeyRune binding: %q ok=%v", holder, ok)
 	}
 }
 

@@ -154,14 +154,13 @@ func TestDeliverabilityConsistentWithDecoderConflation(t *testing.T) {
 	}
 }
 
-// FINDING (non-blocking, internal contradiction): the decoder surfaces LF/^J
-// (Ctrl+J / Ctrl+Enter) as a DISTINCT usable event TypeEvent{Key: KeyEnter,
-// Ctrl: true}, but Deliverability reports BOTH that chord (key==KeyEnter, ctrl) and
-// Ctrl+J as undeliverable. So the toolkit decodes a chord into a usable submit key
-// while its own deliverability service says that chord can never fire. This pins the
-// actual behaviour; the report recommends reconciling the two (treat Ctrl+Enter as
-// deliverable since the decoder makes it distinct from plain Enter).
-func TestDeliverabilityCtrlEnterContradictsDecoder(t *testing.T) {
+// REGRESSION GUARD (was a FINDING): the decoder surfaces LF/^J as a DISTINCT usable
+// event TypeEvent{Key: KeyEnter, Ctrl: true}. The deliverability table must now AGREE
+// with the decoder for the named-key submit chord: Ctrl+Enter (key==KeyEnter, ctrl) is
+// DELIVERABLE. The raw rune Ctrl+J is still undeliverable (it is one of several bytes
+// that fold to that single submit event, so a binding on the rune 'j' can't be told
+// apart from a real Ctrl+Enter). This guard pins the reconciliation.
+func TestDeliverabilityCtrlEnterReconciledWithDecoder(t *testing.T) {
 	evAny, _, ok := parseOneInput([]byte{'\n'})
 	if !ok {
 		t.Fatal("LF must decode")
@@ -170,12 +169,32 @@ func TestDeliverabilityCtrlEnterContradictsDecoder(t *testing.T) {
 	if got.Key != KeyEnter || !got.Ctrl {
 		t.Fatalf("LF must decode to a distinct Ctrl+Enter, got %+v", evAny)
 	}
-	// Yet the deliverability table calls that very chord undeliverable.
-	if dok, _ := Deliverability(KeyEnter, 0, true, false, false); dok {
-		t.Fatal("documenting actual behaviour: Ctrl+Enter is currently reported undeliverable")
+	// The named-key Ctrl+Enter the decoder produces is now deliverable, matching reality.
+	if dok, reason := Deliverability(KeyEnter, 0, true, false, false); !dok {
+		t.Fatalf("Ctrl+Enter (named-key) must be deliverable, got reason %q", reason)
 	}
-	// ...and Ctrl+J (the byte that produced the usable event) too.
+	// The raw rune Ctrl+J remains undeliverable (folds into the submit event).
 	if dok, _ := Deliverability(KeyRune, 'j', true, false, false); dok {
-		t.Fatal("documenting actual behaviour: Ctrl+J is currently reported undeliverable")
+		t.Fatal("rune Ctrl+J must remain undeliverable")
+	}
+	// And rune Ctrl+M still collapses to plain Enter.
+	if dok, _ := Deliverability(KeyRune, 'm', true, false, false); dok {
+		t.Fatal("rune Ctrl+M must remain undeliverable")
+	}
+}
+
+// Alt is accepted but intentionally does NOT lift the Ctrl-level verdicts (the
+// OS/terminal captures act on the raw control byte, which an Alt/ESC prefix leaves in
+// the stream). Pin that design decision: Ctrl+Alt+S stays undeliverable, while an Alt
+// modifier on an already-deliverable combo (Alt+N, no Ctrl) stays deliverable.
+func TestDeliverabilityAltDoesNotLiftCtrlVerdict(t *testing.T) {
+	if ok, _ := Deliverability(KeyRune, 's', true, false, true); ok {
+		t.Fatal("Ctrl+Alt+S must remain undeliverable (Alt does not lift flow-control capture)")
+	}
+	if ok, _ := Deliverability(KeyRune, 'm', true, false, true); ok {
+		t.Fatal("Ctrl+Alt+M must remain undeliverable")
+	}
+	if ok, reason := Deliverability(KeyRune, 'n', false, false, true); !ok {
+		t.Fatalf("Alt+N (no Ctrl) must be deliverable, got reason %q", reason)
 	}
 }

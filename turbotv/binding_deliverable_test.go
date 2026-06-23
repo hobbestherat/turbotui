@@ -143,21 +143,23 @@ func TestChordDeliverableMatchesTuiDeliverability(t *testing.T) {
 	}
 }
 
-// FINDING (non-blocking, internal contradiction): the byte decoder (app.go
-// parseOneInput) surfaces LF/^J as a DISTINCT, usable submit key
-// TypeEvent{Key: KeyEnter, Ctrl: true} ("Ctrl+Enter"), yet Deliverable reports that
-// same chord as undeliverable with the reason "Ctrl+M ... indistinguishable from
-// Enter". So the toolkit delivers a chord its own deliverability service says can
-// never fire. A capture UI would refuse a Ctrl+Enter binding that would in fact work.
-// This test pins the ACTUAL behaviour (undeliverable); see the report for the
-// recommendation (treat Ctrl+Enter as deliverable, or fix the reason text).
-func TestChordDeliverableCtrlEnterContradictsDecoder(t *testing.T) {
-	c := Chord{Key: tui.KeyEnter, Ctrl: true}
-	ok, reason := c.Deliverable()
+// REGRESSION GUARD (was a FINDING): the decoder surfaces LF/^J as a DISTINCT, usable
+// submit key TypeEvent{Key: KeyEnter, Ctrl: true}, so the named-key Ctrl+Enter chord
+// must be DELIVERABLE — it is distinguishable from a plain Enter and from a rune
+// Ctrl+M. The earlier implementation folded `key == KeyEnter` into the Ctrl+M==Enter
+// case and wrongly refused it; the fix distinguishes the named-key submit chord from
+// the rune Ctrl+M. This guard pins the corrected behaviour so a regression re-trips.
+func TestChordDeliverableCtrlEnterIsDeliverable(t *testing.T) {
+	// The named-key Ctrl+Enter is a real, distinct submit key.
+	if ok, reason := (Chord{Key: tui.KeyEnter, Ctrl: true}).Deliverable(); !ok {
+		t.Fatalf("Ctrl+Enter (named-key) must be deliverable, got reason %q", reason)
+	}
+	// But the RUNE Ctrl+M still collapses to carriage return == plain Enter.
+	ok, reason := (Chord{Key: tui.KeyRune, Rune: 'm', Ctrl: true}).Deliverable()
 	if ok {
-		t.Fatal("documenting actual behaviour: Ctrl+Enter is currently reported undeliverable")
+		t.Fatal("rune Ctrl+M must remain undeliverable (== Enter)")
 	}
 	if !strings.Contains(reason, "Enter") {
-		t.Errorf("reason %q expected to mention Enter", reason)
+		t.Errorf("Ctrl+M reason %q expected to mention Enter", reason)
 	}
 }
