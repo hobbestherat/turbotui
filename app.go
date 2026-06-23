@@ -1144,6 +1144,67 @@ func parseOneInput(data []byte) (any, int, bool) {
 	return TypeEvent{Key: KeyRune, Rune: r}, size, true
 }
 
+// Deliverability reports whether a key combination (named Key or printable/control
+// Rune plus Ctrl/Shift/Alt) can actually reach an application through a terminal in
+// raw mode, and a human-readable reason when it cannot. It is the single source of
+// truth for terminal-input ambiguity: it lives next to the byte→TypeEvent decoder
+// above, which is where the conflated mappings physically happen (CR is Enter, TAB
+// is Tab, ESC is Esc, and C0 control bytes fold to caret notation), so the binding
+// layer (tv.Chord.Deliverable) can consult this table instead of duplicating the
+// knowledge.
+//
+// A false result does not mean the byte never arrives — it means a binding on that
+// combination could never fire distinctly, because the terminal delivers it as a
+// different, already-meaningful key (Enter/Tab/Esc/Backspace), the OS/shell consumes
+// it (job control, flow control), or the terminal cannot distinguish it from a
+// plainer combination (Ctrl+Shift+letter vs Ctrl+letter). Capture UIs should warn or
+// refuse these and show the reason.
+//
+// The combination is described by its *intended* form (what the user pressed), e.g.
+// Ctrl+M is {Key: KeyRune, Rune: 'm', Ctrl: true}; the function reports that it is
+// indistinguishable from Enter. Ordinary combinations (Ctrl+N, Ctrl+F, plain letters,
+// arrows, function keys) report ok=true with an empty reason.
+func Deliverability(key KeyCode, r rune, ctrl, shift, alt bool) (ok bool, reason string) {
+	if !ctrl {
+		// Without Ctrl there is no C0 collapsing and no job/flow-control capture;
+		// every named key and printable rune is deliverable. (Plain letters, arrows,
+		// function keys, Shift/Alt-modified printables.)
+		return true, ""
+	}
+	// Fold the rune to lower case so Ctrl+M and Ctrl+m are treated alike, matching the
+	// decoder which lower-cases Ctrl+<letter>.
+	lower := r
+	if lower >= 'A' && lower <= 'Z' {
+		lower += 'a' - 'A'
+	}
+	// Ctrl+Shift+<letter> is indistinguishable from Ctrl+<letter> on most terminals:
+	// the legacy encoding has no bit for Shift on a control chord, so both send the
+	// same control byte. (Only kitty/CSI-u-capable terminals can tell them apart, and
+	// we cannot assume them.)
+	if shift && lower >= 'a' && lower <= 'z' {
+		return false, "Ctrl+Shift+letter is indistinguishable from Ctrl+letter on most terminals"
+	}
+	switch {
+	case key == KeyEnter || lower == 'm':
+		return false, "Ctrl+M is indistinguishable from Enter (both arrive as carriage return)"
+	case key == KeyTab || lower == 'i':
+		return false, "Ctrl+I is indistinguishable from Tab (both arrive as horizontal tab)"
+	case key == KeyEscape || r == '[':
+		return false, "Ctrl+[ is indistinguishable from Esc (both arrive as the escape byte)"
+	case key == KeyBackspace || lower == 'h':
+		return false, "Ctrl+H is indistinguishable from Backspace on many terminals"
+	case lower == 'j':
+		return false, "Ctrl+J is indistinguishable from line feed (Ctrl+Enter)"
+	case lower == 'z':
+		return false, "Ctrl+Z is captured by the shell as SIGTSTP (suspend)"
+	case lower == 's':
+		return false, "Ctrl+S triggers XOFF terminal flow control (freezes output)"
+	case lower == 'q':
+		return false, "Ctrl+Q triggers XON terminal flow control"
+	}
+	return true, ""
+}
+
 func parseEscape(data []byte) (any, int, bool) {
 	if len(data) == 1 {
 		return nil, 0, false
