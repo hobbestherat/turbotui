@@ -45,6 +45,7 @@ func NewButton(label string, bounds Rect, onPress func()) *Button {
 	}
 	button.Component = NewComponent(bounds)
 	button.Component.Focusable = true
+	button.Component.activatesOnEnter = true
 	button.Component.DrawOutside = true
 	button.Component.DrawFn = button.draw
 	button.Component.OnTypeFn = button.handleType

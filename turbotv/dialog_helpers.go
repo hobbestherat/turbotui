@@ -107,6 +107,11 @@ func ShowConfirmYesNo(desktop *Desktop, title string, message string, onResult f
 	dialog.SetDefaultCancelButtons(yes, no)
 
 	layer = NewModalLayer("confirm-dialog", dialog)
+	// A confirm dialog is user-initiated — it appears in direct response to a user
+	// action and cannot interrupt mid-keystroke — so it opts out of the modal
+	// Enter-grace (gogent#347, which targets background-triggered modals): Enter on
+	// the focused button works immediately.
+	layer.NoEnterGrace = true
 	desktop.AddLayer(layer)
 	desktop.SetFocus(no)
 	return layer
