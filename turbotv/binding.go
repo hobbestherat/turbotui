@@ -425,26 +425,44 @@ func (e *ConflictError) Error() string {
 // Conflict is keyed on (chord, scope): a chord held only in a DIFFERENT scope is not a
 // conflict (a Global Ctrl+R and a Focus-scope plain r coexist — they are consulted at
 // different dispatch positions). Chord equality is case-insensitive on the rune and
-// exact on the named key and Ctrl/Shift/Alt modifiers (see Chord.conflictsWith).
+// normalised across the Key axis for runes, and exact on the named key and
+// Ctrl/Shift/Alt modifiers (see Chord.conflictsWith).
+//
+// ConflictFor excludes nothing: a customizer that pre-warns by calling
+// ConflictFor(currentChord, scope) for the action it is editing gets that same action
+// back as the holder, because the action's own current binding matches. Callers editing
+// a known action should ignore a holder equal to that action (compare against
+// BindingFor(actionID) or the row's ActionID). Use Rebind to commit, which excludes the
+// target binding automatically.
 func (r *BindingRegistry) ConflictFor(chord Chord, scope Scope) (ActionID, bool) {
-	return r.conflictForExcluding(chord, scope, "")
+	return r.conflictScan(chord, scope, -1, "")
 }
 
-// conflictForExcluding is the shared lookup behind ConflictFor and Rebind. It returns
-// the first registered binding in scope whose chord collides with chord, skipping every
-// entry whose ActionID equals exclude. A binding never conflicts with its own action's
-// other entries, so Rebind passes the action being rebound (so rebinding an action onto
-// a chord it already holds is a no-op success, not a self-conflict) and ConflictFor
-// passes the empty ActionID to consider every entry. Skipping by ActionID rather than by
-// index also means an action registered more than once can never be reported as
-// conflicting with itself — which would be a nonsensical Holder == ActionID error.
-func (r *BindingRegistry) conflictForExcluding(chord Chord, scope Scope, exclude ActionID) (ActionID, bool) {
+// conflictScan is the shared lookup behind ConflictFor and Rebind. It returns the first
+// registered binding in scope whose chord collides with chord, skipping the entry at
+// excludeIdx (pass -1 to skip none) and any OTHER entry whose ActionID equals the
+// non-empty excludeID. The two exclusions are independent on purpose:
+//
+//   - excludeIdx gives entry identity, so Rebind never reports the exact binding it is
+//     rebinding as a self-conflict — this works even for an empty ActionID, which two
+//     distinct anonymous bindings may share (the ActionID doc allows the empty value).
+//   - excludeID is the multi-registration guard: an action registered more than once is
+//     not reported as conflicting with its own other entries. It is skipped only when
+//     non-empty, so distinct anonymous (empty-ActionID) bindings are NOT collapsed and a
+//     genuine clash between two of them is still detected.
+//
+// ConflictFor passes (-1, "") to consider every entry; Rebind passes the target index
+// and its ActionID.
+func (r *BindingRegistry) conflictScan(chord Chord, scope Scope, excludeIdx int, excludeID ActionID) (ActionID, bool) {
 	for i := range r.entries {
+		if i == excludeIdx {
+			continue
+		}
 		binding := r.entries[i].binding
 		if binding.Scope != scope {
 			continue
 		}
-		if exclude != "" && binding.ActionID == exclude {
+		if excludeID != "" && binding.ActionID == excludeID {
 			continue
 		}
 		if binding.Chord.conflictsWith(chord) {
@@ -484,8 +502,10 @@ func (r *BindingRegistry) BindingFor(actionID ActionID) (KeyBinding, bool) {
 //
 // Rebind matches the FIRST binding registered with actionID and only that binding;
 // register a distinct, non-empty ActionID per rebindable action so the target is
-// unambiguous. The conflict check ignores every entry sharing actionID, so an action
-// registered more than once is never reported as conflicting with itself.
+// unambiguous. The conflict check excludes the target binding by its entry identity
+// (so a self-rebind succeeds even for the documented empty ActionID) and, when actionID
+// is non-empty, every other entry sharing it (so an action registered more than once is
+// never reported as conflicting with itself).
 func (r *BindingRegistry) Rebind(actionID ActionID, chord Chord) error {
 	idx := -1
 	for i := range r.entries {
@@ -498,7 +518,7 @@ func (r *BindingRegistry) Rebind(actionID ActionID, chord Chord) error {
 		return fmt.Errorf("rebind: no binding registered for action %q", actionID)
 	}
 	scope := r.entries[idx].binding.Scope
-	if holder, ok := r.conflictForExcluding(chord, scope, actionID); ok {
+	if holder, ok := r.conflictScan(chord, scope, idx, actionID); ok {
 		return &ConflictError{Chord: chord, Scope: scope, ActionID: actionID, Holder: holder}
 	}
 	r.entries[idx].binding.Chord = chord
