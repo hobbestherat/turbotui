@@ -148,30 +148,41 @@ func (r *BindingRegistry) Len() int {
 	return len(r.entries)
 }
 
-// Match returns the first registered binding whose chord matches event,
+// Match returns the first registered ScopeGlobal binding whose chord matches event,
 // regardless of whether its handler is live; ok is false when nothing matches. It
-// is the pure chord -> binding lookup (use Dispatch to actually fire the action).
+// is the pure chord -> binding lookup for the Global (menu-accelerator) scope — use
+// Dispatch to actually fire the action, and MatchFocus/MatchFallthrough for the
+// scoped lookups.
+//
+// Match is deliberately Global-only, not scope-agnostic: it shares the registry type
+// with the scoped lookups but only ever surfaces Global bindings. This means a Focus
+// or Fallthrough binding mistakenly registered into the menu (Global) registry is
+// inert here rather than silently firing as a global accelerator — which would
+// bypass focus-scoping and modal blocking. Register scoped bindings into
+// Desktop.ScopedBindings and Global accelerators into the menu (Desktop.Bindings).
 func (r *BindingRegistry) Match(event tui.TypeEvent) (KeyBinding, bool) {
 	for _, entry := range r.entries {
-		if entry.binding.Chord.Matches(event) {
+		if entry.applies(ScopeGlobal, nil) && entry.binding.Chord.Matches(event) {
 			return entry.binding, true
 		}
 	}
 	return KeyBinding{}, false
 }
 
-// Dispatch fires the first matching binding that is live and reports whether the
-// event was consumed. Matching bindings are tried in registration order: a binding
-// whose handler reports it was not live (returns false) is skipped and the next
-// match is tried, so a disabled menu accelerator does not swallow the chord. A
+// Dispatch fires the first matching ScopeGlobal binding that is live and reports
+// whether the event was consumed. Matching bindings are tried in registration order:
+// a binding whose handler reports it was not live (returns false) is skipped and the
+// next match is tried, so a disabled menu accelerator does not swallow the chord. A
 // matched binding with a nil handler consumes the event without doing anything.
 //
-// Dispatch is scope-agnostic: it considers every registered binding. The Phase-1
-// menu registry holds only Global bindings, so this is the menu-accelerator path.
-// The scope-filtered Focus/Fallthrough points use DispatchFocus/DispatchFallthrough.
+// Like Match, Dispatch is Global-only. The menu accelerator path (HandleAccelerator)
+// uses it, and the menu registry holds only Global bindings, so this is exactly the
+// menu-accelerator dispatch. A Focus/Fallthrough binding misplaced into the menu
+// registry is inert here (never fires as a global accelerator); the scoped points
+// use DispatchFocus/DispatchFallthrough.
 func (r *BindingRegistry) Dispatch(event tui.TypeEvent) bool {
 	for _, entry := range r.entries {
-		if !entry.binding.Chord.Matches(event) {
+		if !entry.applies(ScopeGlobal, nil) || !entry.binding.Chord.Matches(event) {
 			continue
 		}
 		if entry.handler == nil {

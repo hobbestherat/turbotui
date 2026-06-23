@@ -153,8 +153,13 @@ func (d *Desktop) SetMenuBar(bar *MenuBar) {
 // Phase-1 caveat: the instance is stable, but its contents are owned by the menu
 // tree. A caller may Register an extra binding and it persists until the next
 // RebuildBindings, which resets the registry to the menu bindings and drops the
-// extra. Durable non-menu scopes (Focus/Fallthrough) are a phase-2 concern; until
-// then do not rely on a registration outliving a menu rebuild.
+// extra. For durable non-menu scopes (Focus/Fallthrough) use ScopedBindings, which
+// survives a menu rebuild.
+//
+// Scope correspondence: this registry is the Global scope. Its consumers (Match,
+// Dispatch via HandleAccelerator) only ever surface ScopeGlobal bindings, so a
+// Focus or Fallthrough binding registered here is inert — it will not fire as a
+// global accelerator. Register scoped bindings into ScopedBindings instead.
 //
 // Like the rest of the desktop, the registry is loop-confined: query or mutate it
 // (Match/Register/Clear) only on the event-loop goroutine or via Post, since the
@@ -178,9 +183,14 @@ func (d *Desktop) Bindings() *BindingRegistry {
 // registered here both checks are inert, so the dispatch chain is unchanged.
 //
 // Use Bindings() for Global menu accelerators; register Focus/Fallthrough bindings
-// here. Like the rest of the desktop, the registry is loop-confined: query or mutate
-// it only on the event-loop goroutine or via Post (see the Desktop threading
-// contract).
+// here. Scope correspondence: this registry is consulted ONLY through DispatchFocus
+// and DispatchFallthrough, so a ScopeGlobal binding registered here is inert (it
+// fires nowhere — register Global accelerators on the menu via Bindings()). The
+// mismatch is benign (dead, not dangerous) but silent, so keep each scope in its
+// own registry.
+//
+// Like the rest of the desktop, the registry is loop-confined: query or mutate it
+// only on the event-loop goroutine or via Post (see the Desktop threading contract).
 func (d *Desktop) ScopedBindings() *BindingRegistry {
 	if d.bindings == nil {
 		d.bindings = NewBindingRegistry()
