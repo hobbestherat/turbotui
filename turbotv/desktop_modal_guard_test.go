@@ -186,6 +186,45 @@ func TestModalEnterGraceSuppressesEnterButNotOtherActivation(t *testing.T) {
 	}
 }
 
+func TestModalEnterGraceAppliesToFreshModalByDefault(t *testing.T) {
+	desktop := newTestDesktop(t, 80, 25)
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	desktop.SetClock(func() time.Time { return now })
+
+	pressed := 0
+	root := NewComponent(Rect{X: 10, Y: 5, W: 20, H: 5})
+	button := NewButton("OK", Rect{X: 1, Y: 1, W: 10, H: 1}, func() { pressed++ })
+	root.AddChild(button)
+	desktop.AddLayer(NewModalLayer("modal", root))
+	desktop.SetFocus(button)
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyEnter})
+	if pressed != 0 {
+		t.Fatalf("expected a freshly shown modal button to ignore Enter during the default grace window, got %d presses", pressed)
+	}
+}
+
+func TestModalEnterGraceDoesNotSuppressEnterForFocusedInput(t *testing.T) {
+	desktop := newTestDesktop(t, 80, 25)
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	desktop.SetClock(func() time.Time { return now })
+	desktop.SetEnterGrace(DefaultModalEnterGrace)
+
+	submits := 0
+	root := NewComponent(Rect{X: 10, Y: 5, W: 30, H: 8})
+	input := NewTextBox("", Rect{X: 1, Y: 1, W: 20, H: 1})
+	input.OnSubmit = func() { submits++ }
+	root.AddChild(input)
+	desktop.AddLayer(NewModalLayer("modal", root))
+	desktop.SetFocus(input)
+
+	now = now.Add(10 * time.Millisecond)
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyEnter})
+	if submits != 1 {
+		t.Fatalf("expected Enter grace to target button activation only; focused modal input got %d submits", submits)
+	}
+}
+
 func TestModalEnterGraceLeavesEscapeDeliverable(t *testing.T) {
 	desktop := newTestDesktop(t, 80, 25)
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
@@ -226,6 +265,46 @@ func TestModalEnterGraceDisabledByDefault(t *testing.T) {
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyEnter})
 	if pressed != 1 {
 		t.Fatalf("expected Enter to activate button when grace is disabled, got %d presses", pressed)
+	}
+}
+
+func TestRemovingBuriedModalDoesNotCorruptFocusHistoryForTopModal(t *testing.T) {
+	desktop := newTestDesktop(t, 80, 25)
+	baseRoot := NewComponent(Rect{W: 80, H: 25})
+	baseInput := NewTextBox("", Rect{X: 1, Y: 1, W: 20, H: 1})
+	baseRoot.AddChild(baseInput)
+	desktop.AddLayer(NewFullscreenLayer("base", baseRoot))
+	desktop.SetFocus(baseInput)
+
+	outerRoot := NewComponent(Rect{X: 5, Y: 3, W: 30, H: 8})
+	outerButton := NewButton("Outer", Rect{X: 1, Y: 1, W: 10, H: 1}, nil)
+	outerRoot.AddChild(outerButton)
+	outerLayer := NewModalLayer("outer", outerRoot)
+	desktop.AddLayer(outerLayer)
+	desktop.SetFocus(outerButton)
+
+	middleRoot := NewComponent(Rect{X: 8, Y: 5, W: 30, H: 8})
+	middleButton := NewButton("Middle", Rect{X: 1, Y: 1, W: 10, H: 1}, nil)
+	middleRoot.AddChild(middleButton)
+	middleLayer := NewModalLayer("middle", middleRoot)
+	desktop.AddLayer(middleLayer)
+	desktop.SetFocus(middleButton)
+
+	innerRoot := NewComponent(Rect{X: 11, Y: 7, W: 30, H: 8})
+	innerButton := NewButton("Inner", Rect{X: 1, Y: 1, W: 10, H: 1}, nil)
+	innerRoot.AddChild(innerButton)
+	innerLayer := NewModalLayer("inner", innerRoot)
+	desktop.AddLayer(innerLayer)
+	desktop.SetFocus(innerButton)
+
+	desktop.RemoveLayer(outerLayer)
+	if !innerButton.Component.Focused() {
+		t.Fatalf("expected removing a buried modal to leave top modal focus intact")
+	}
+
+	desktop.RemoveLayer(innerLayer)
+	if !middleButton.Component.Focused() {
+		t.Fatalf("expected closing top modal to restore focus to the still-present middle modal button")
 	}
 }
 
@@ -310,5 +389,26 @@ func TestRecentlyTypedTracksPasteAndDelete(t *testing.T) {
 	desktop.handleType(tui.TypeEvent{Key: tui.KeyBackspace})
 	if !desktop.RecentlyTyped(time.Second) {
 		t.Fatalf("expected consumed backspace/delete editing key to count as recent typing")
+	}
+}
+
+func TestRecentlyTypedIgnoresButtonActivationSpace(t *testing.T) {
+	desktop := newTestDesktop(t, 80, 25)
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	desktop.SetClock(func() time.Time { return now })
+
+	root := NewComponent(Rect{W: 80, H: 25})
+	pressed := 0
+	button := NewButton("OK", Rect{X: 1, Y: 1, W: 10, H: 1}, func() { pressed++ })
+	root.AddChild(button)
+	desktop.AddLayer(NewFullscreenLayer("base", root))
+	desktop.SetFocus(button)
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRune, Rune: ' '})
+	if pressed != 1 {
+		t.Fatalf("expected Space to activate focused button once, got %d presses", pressed)
+	}
+	if desktop.RecentlyTyped(time.Second) {
+		t.Fatalf("expected button Space activation not to be reported as recent typing into an input")
 	}
 }
