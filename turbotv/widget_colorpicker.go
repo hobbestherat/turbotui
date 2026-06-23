@@ -463,19 +463,28 @@ func (p *ColorPicker) ensureVisible() {
 func (p *ColorPicker) drawPopup(_ *VisualComponent, surface Surface) {
 	lay := p.layout()
 	if p.Shadow {
+		// The shadow is cast outside the box, so paint it before clipping.
 		surface.DrawShadow(lay.rect, activeTheme.WindowShadow, DefaultShadowStyle)
 	}
-	surface.Fill(lay.rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
-	surface.DrawBox(lay.rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
+	// Confine box content to the popup rect: on a narrow/short terminal the
+	// width/height clamp in popupRect can leave the grid's configured columns or
+	// the slider+preview rows reaching past the box, and the catcher is a
+	// full-screen layer (its surface clips to the screen, not the box), so without
+	// this they would overdraw neighbouring UI. Each region is then clipped to its
+	// own rect so a swatch can never bleed over the border or scrollbar column.
+	box := surface.WithClip(lay.rect)
+	box.Fill(lay.rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
+	box.DrawBox(lay.rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
 
-	p.drawGrid(surface, lay)
+	p.drawGrid(box, lay)
 	if lay.sliders.H > 0 {
-		p.drawSliders(surface, lay)
+		p.drawSliders(box.WithClip(lay.sliders), lay)
 	}
-	p.drawPreview(surface, lay.preview)
+	p.drawPreview(box.WithClip(lay.preview), lay.preview)
 }
 
 func (p *ColorPicker) drawGrid(surface Surface, lay pickerLayout) {
+	cells := surface.WithClip(lay.grid)
 	for row := 0; row < lay.visRows; row++ {
 		gridRow := p.offset + row
 		for col := 0; col < p.cols; col++ {
@@ -485,7 +494,7 @@ func (p *ColorPicker) drawGrid(surface Surface, lay pickerLayout) {
 			}
 			cellX := lay.grid.X + col*colorSwatchW
 			cellRect := Rect{X: cellX, Y: lay.grid.Y + row, W: colorSwatchW, H: 1}
-			p.drawSwatch(surface, cellRect, p.colors[index], index == p.highlight && p.section == sectionGrid)
+			p.drawSwatch(cells, cellRect, p.colors[index], index == p.highlight && p.section == sectionGrid)
 		}
 	}
 	if lay.scrollbar {
