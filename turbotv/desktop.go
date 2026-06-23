@@ -62,11 +62,6 @@ type Desktop struct {
 	// enterGrace is the modal Enter-grace window (gogent#347). 0 disables suppression
 	// (the default), preserving existing behaviour; SetEnterGrace turns it on.
 	enterGrace time.Duration
-	// focusHistory is the modal focus-restore stack (gogent#348). AddLayer pushes the
-	// pre-modal focused widget when a Modal layer is added; RemoveLayer/RemoveTopLayer
-	// pops it and re-focuses that widget if it is still focusable in the new top layer,
-	// else falls back to the clear-to-nil ensureFocusInTopLayer behaviour.
-	focusHistory []*VisualComponent
 	// lastInputAt is the timestamp of the most recent text input the focused widget
 	// consumed (gogent#346), stamped from now(). RecentlyTyped queries it so a consumer
 	// can defer focus-stealing modals while the user is actively typing.
@@ -286,9 +281,9 @@ func (d *Desktop) AddLayer(layer *Layer) {
 		layer.window.desktop = d
 	}
 	if layer.Modal {
-		// Remember the pre-modal focus so RemoveLayer can restore it, and arm the
-		// Enter-grace window from the (injectable) clock.
-		d.focusHistory = append(d.focusHistory, d.focused)
+		// Remember the pre-modal focus on the layer itself so closing it can restore
+		// that widget, and arm the Enter-grace window from the (injectable) clock.
+		layer.restoreFocus = d.focused
 		layer.armedAt = d.now()
 	}
 	if layer.FullScreen {
@@ -505,23 +500,26 @@ func (d *Desktop) RemoveLayer(layer *Layer) {
 	d.Redraw()
 }
 
-// restoreFocusAfterRemoval re-homes keyboard focus once `removed` has left the stack.
-// For a Modal layer it pops the focus-history stack (gogent#348) and re-focuses the
-// widget that held focus before the modal opened, provided it is still focusable in the
-// new top layer; otherwise — and for every non-modal layer — it falls back to the
-// existing clear-to-nil ensureFocusInTopLayer behaviour, leaving non-modal removal
-// unchanged.
+// restoreFocusAfterRemoval re-homes keyboard focus once `removed` has left the stack
+// (gogent#348). For a non-modal layer it keeps the existing clear-to-nil
+// ensureFocusInTopLayer behaviour, leaving non-modal removal unchanged. For a Modal
+// layer:
+//   - If the focused widget still lives in the new top layer, the removed modal was
+//     buried beneath the one the user is on, so focus is left untouched (closing a
+//     background modal must not yank focus off the active one).
+//   - Otherwise the modal that held focus is closing: re-focus the widget recorded on
+//     that layer before it opened, if it is still focusable in the new top layer; else
+//     fall back to clear-to-nil. The target is stored per-layer, so removing modals
+//     out of order cannot desynchronise restore targets.
 func (d *Desktop) restoreFocusAfterRemoval(removed *Layer) {
 	if removed == nil || !removed.Modal {
 		d.ensureFocusInTopLayer()
 		return
 	}
-	var prev *VisualComponent
-	if n := len(d.focusHistory); n > 0 {
-		prev = d.focusHistory[n-1]
-		d.focusHistory = d.focusHistory[:n-1]
+	if d.focused != nil && d.focusableInTopLayer(d.focused) {
+		return
 	}
-	if prev != nil && d.focusableInTopLayer(prev) {
+	if prev := removed.restoreFocus; prev != nil && d.focusableInTopLayer(prev) {
 		d.setFocus(prev)
 		return
 	}

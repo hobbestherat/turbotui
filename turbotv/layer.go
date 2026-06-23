@@ -22,6 +22,14 @@ type Layer struct {
 	// It lets the desktop hand the window a back-reference so Window.Close and
 	// bounds constraints work without the app threading the layer through itself.
 	window *Window
+	// restoreFocus is the widget that held keyboard focus immediately before this
+	// (Modal) layer was added (gogent#348). The desktop records it on AddLayer and,
+	// when the modal is removed, re-focuses it if it is still focusable in the new top
+	// layer. Storing the target per-layer (rather than on a shared positional stack)
+	// keeps out-of-order modal removals — closing a buried modal while others remain on
+	// top — from desynchronising which widget each modal restores to. Nil when the
+	// layer is not modal or nothing was focused when it opened.
+	restoreFocus *VisualComponent
 	// armedAt is the modal Enter-grace timestamp (gogent#347). The desktop stamps it
 	// from its (injectable) clock when a Modal layer is added, marking the instant the
 	// modal appeared. While the desktop's enter-grace window has not yet elapsed since
