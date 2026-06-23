@@ -866,9 +866,11 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			return
 		}
 		if d.focused.BubbleType(event) {
-			// Typing-awareness (gogent#346): record when the focused widget consumes a
-			// text-editing key so RecentlyTyped can report the user is mid-keystroke.
-			if isTypingKey(event) {
+			// Typing-awareness (gogent#346): record when the focused TEXT field consumes
+			// a text-editing key so RecentlyTyped can report the user is mid-keystroke.
+			// Gated on focusedIsTextInput so activating a focused button with Space — a
+			// plain rune the button consumes — does not masquerade as the user typing.
+			if isTypingKey(event) && d.focusedIsTextInput() {
 				d.lastInputAt = d.now()
 			}
 			d.RequestRedraw()
@@ -986,9 +988,11 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 		return
 	}
 	if d.focused.BubblePaste(event.Text) {
-		// A consumed paste is text input, so it counts toward typing-awareness
-		// (gogent#346) just like keystrokes do.
-		d.lastInputAt = d.now()
+		// A consumed paste into a text field is text input, so it counts toward
+		// typing-awareness (gogent#346) just like keystrokes do.
+		if d.focusedIsTextInput() {
+			d.lastInputAt = d.now()
+		}
 		d.RequestRedraw()
 	}
 }
@@ -996,9 +1000,15 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 // enterSuppressed reports whether Enter should currently be swallowed for the focused
 // widget under the modal Enter-grace (gogent#347): the grace must be enabled, the top
 // input layer must be an armed modal, and less than the grace duration must have
-// elapsed since it was armed (measured on the injectable clock).
+// elapsed since it was armed (measured on the injectable clock). A focused text-entry
+// field is exempt — there Enter means newline/submit rather than button activation, and
+// the grace only guards against an accidental activation of a freshly-focused button,
+// so suppressing Enter in a focused input would needlessly block legitimate editing.
 func (d *Desktop) enterSuppressed() bool {
 	if d.enterGrace <= 0 {
+		return false
+	}
+	if d.focusedIsTextInput() {
 		return false
 	}
 	top := d.topInputLayer()
@@ -1006,6 +1016,15 @@ func (d *Desktop) enterSuppressed() bool {
 		return false
 	}
 	return d.now().Sub(top.armedAt) < d.enterGrace
+}
+
+// focusedIsTextInput reports whether the focused widget is a text-entry field: it
+// exposes a text caret via CursorFn, as TextBox and MultiLineInput do and a Button or
+// Checkbox does not. It scopes both the typing-awareness signal (gogent#346 — so
+// activating a focused button does not register as the user typing) and the Enter-grace
+// exemption (gogent#347 — so Enter still edits a focused field during the grace window).
+func (d *Desktop) focusedIsTextInput() bool {
+	return d.focused != nil && d.focused.CursorFn != nil
 }
 
 // isTypingKey reports whether a key event represents text input into a field (a
