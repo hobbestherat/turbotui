@@ -139,6 +139,33 @@ func TestColorPickerPopupClipsTrueColorControlsOnShortTerminals(t *testing.T) {
 	}
 }
 
+func TestColorPickerClippedSliderRowsAreNotClickableOnShortTerminals(t *testing.T) {
+	_, p := setupColorPicker(t, 80, 6, tui.ColorLevelTrueColor, tui.RGBColor(10, 20, 30))
+	p.open()
+	lay := p.layout()
+	if lay.sliders.H == 0 || lay.sliders.Bottom() <= lay.rect.Bottom() {
+		t.Fatalf("test expects sliders to extend past the short popup, layout=%+v", lay)
+	}
+
+	beforeRGB := p.rgb
+	beforeSection := p.section
+	beforeChannel := p.channel
+	p.popupClick(nil, tui.ClickEvent{
+		X:      lay.sliders.X,
+		Y:      lay.rect.Bottom(),
+		Button: tui.MouseLeft,
+		Down:   false,
+	})
+
+	if p.rgb != beforeRGB || p.section != beforeSection || p.channel != beforeChannel {
+		t.Fatalf("click on clipped slider/bottom-border cell should be ignored, got rgb=%v section=%d channel=%d; want rgb=%v section=%d channel=%d",
+			p.rgb, p.section, p.channel, beforeRGB, beforeSection, beforeChannel)
+	}
+	if !p.IsOpen() {
+		t.Fatalf("click on popup frame should not close the picker")
+	}
+}
+
 func TestColorPickerDoesNotOpenWhenColorDisabled(t *testing.T) {
 	_, p := setupColorPicker(t, 40, 10, tui.ColorLevelNone, tui.ANSIColor(3))
 	p.open()
