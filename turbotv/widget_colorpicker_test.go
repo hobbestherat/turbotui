@@ -102,6 +102,43 @@ func TestColorPickerPaletteGridRendersEveryCellWhenItFits(t *testing.T) {
 	}
 }
 
+func TestColorPickerPopupClipsGridOnNarrowTerminals(t *testing.T) {
+	desktop, p := setupColorPicker(t, 20, 10, tui.ColorLevel256, tui.DefaultColor())
+	p.open()
+	desktop.Redraw()
+	lay := p.layout()
+	border := tui.BorderStyleFor(tui.LineSingle)
+
+	if lay.rect.W != desktop.App().Width() {
+		t.Fatalf("test expects popup width clamped to screen, got rect=%+v screenW=%d", lay.rect, desktop.App().Width())
+	}
+	for y := lay.rect.Y + 1; y < lay.rect.Bottom(); y++ {
+		if got := desktop.App().ReadCell(lay.rect.Right(), y).Ch; got != border.Vertical {
+			t.Fatalf("right border at y=%d was overwritten by grid content: got %q want %q", y, got, border.Vertical)
+		}
+	}
+}
+
+func TestColorPickerPopupClipsTrueColorControlsOnShortTerminals(t *testing.T) {
+	desktop, p := setupColorPicker(t, 80, 6, tui.ColorLevelTrueColor, tui.RGBColor(10, 20, 30))
+	p.open()
+	desktop.Redraw()
+	lay := p.layout()
+	border := tui.BorderStyleFor(tui.LineSingle)
+
+	if lay.sliders.H == 0 {
+		t.Fatalf("test expects truecolor sliders to be present")
+	}
+	if lay.sliders.Bottom() <= lay.rect.Bottom() {
+		t.Fatalf("test expects sliders to be clipped by a short popup, layout=%+v", lay)
+	}
+	for x := lay.rect.X + 1; x < lay.rect.Right(); x++ {
+		if got := desktop.App().ReadCell(x, lay.rect.Bottom()).Ch; got != border.Horizontal {
+			t.Fatalf("bottom border at x=%d was overwritten by clipped controls: got %q want %q", x, got, border.Horizontal)
+		}
+	}
+}
+
 func TestColorPickerDoesNotOpenWhenColorDisabled(t *testing.T) {
 	_, p := setupColorPicker(t, 40, 10, tui.ColorLevelNone, tui.ANSIColor(3))
 	p.open()
