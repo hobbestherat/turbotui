@@ -70,6 +70,12 @@ type Tree struct {
 // NewTree creates an empty tree view.
 func NewTree(bounds Rect) *Tree {
 	t := &Tree{
+		// BG/FG seed from WindowBG/WindowFG, NOT the new ListBG/ListFG (gogent#327):
+		// ListBG defaults to DialogBG, which equals SelectionBG under the stock
+		// DefaultTheme, so seeding a list from it would make an un-recoloured tree's
+		// selection bar invisible. The List* slots exist for consumers (gogent) that
+		// set list.BG/list.FG per instance; the default seed stays on WindowBG so a
+		// plain NewTree keeps a visible selection.
 		FG:    activeTheme.WindowFG,
 		BG:    activeTheme.WindowBG,
 		SelFG: activeTheme.SelectionFG,
