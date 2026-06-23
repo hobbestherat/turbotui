@@ -54,6 +54,12 @@ type Theme struct {
 	MenuSelectFG tui.Color
 	MenuSelectBG tui.Color
 	MenuShadow   tui.Color
+	// ListBG/ListFG are the background/foreground a filterable list (tv.Tree)
+	// seeds from, so a list can read as a distinct inset rather than borrowing the
+	// dialog chrome (gogent#327). Default to the dialog colours so the appearance
+	// is unchanged unless a theme points them elsewhere.
+	ListBG tui.Color
+	ListFG tui.Color
 }
 
 // DefaultTheme is the classic blue palette. Contrast notes: the hot-key colour
@@ -99,6 +105,8 @@ var DefaultTheme = Theme{
 	MenuSelectFG:     tui.ANSIColor(15),
 	MenuSelectBG:     tui.ANSIColor(4),
 	MenuShadow:       tui.ANSIColor(8),
+	ListBG:           tui.ANSIColor(7),
+	ListFG:           tui.ANSIColor(0),
 }
 
 // HighContrastTheme is a black/white, colour-blind-safe preset: chrome is pure
@@ -143,6 +151,8 @@ var HighContrastTheme = Theme{
 	MenuSelectFG:     tui.ANSIColor(0),
 	MenuSelectBG:     tui.ANSIColor(15),
 	MenuShadow:       tui.ANSIColor(0),
+	ListBG:           tui.ANSIColor(0),
+	ListFG:           tui.ANSIColor(15),
 }
 
 // activeTheme is the palette widgets seed from at construction and that
