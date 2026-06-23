@@ -175,6 +175,67 @@ func TestRebindReassignAfterFreeing(t *testing.T) {
 	}
 }
 
+// REGRESSION GUARD (round-2 fix): the empty ActionID is a documented-allowed value,
+// and exclusion now uses entry IDENTITY (index) for the rebind target rather than the
+// ActionID alone. So a no-op self-rebind of an anonymous (empty-ActionID) binding onto
+// its own chord must SUCCEED — round 1 regressed this into a spurious self-conflict
+// because "" was overloaded as the "exclude nothing" sentinel.
+func TestRebindEmptyActionSelfRebindSucceeds(t *testing.T) {
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: chordCtrl('n') /* ActionID "" */}, nil)
+
+	// Self-rebind onto the same chord: no-op success, not a self-conflict.
+	if err := r.Rebind("", chordCtrl('n')); err != nil {
+		t.Fatalf("empty-action self-rebind must succeed, got %v", err)
+	}
+	// Rebinding the anonymous binding onto a free chord also succeeds.
+	if err := r.Rebind("", chordCtrl('f')); err != nil {
+		t.Fatalf("empty-action rebind onto a free chord must succeed, got %v", err)
+	}
+	if got, ok := r.Match(ctrl('f')); !ok {
+		t.Fatalf("after rebind the anonymous binding must answer to Ctrl+F: ok=%v got=%q", ok, got.ActionID)
+	}
+}
+
+// REGRESSION GUARD (round-2 fix): the index/ActionID exclusions are independent. The
+// multi-registration guard (skip same ActionID) must apply ONLY for a non-empty
+// ActionID, so two DISTINCT anonymous bindings are not collapsed: a genuine clash
+// between them is still detected. Rebinding the first anonymous binding onto the chord
+// a SECOND anonymous binding already holds must conflict.
+func TestRebindDistinctAnonymousBindingsStillConflict(t *testing.T) {
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: chordCtrl('n') /* "" #1 */}, nil)
+	r.Register(KeyBinding{Chord: chordCtrl('w') /* "" #2 */}, nil)
+
+	err := r.Rebind("", chordCtrl('w')) // targets #1 (first ""), collides with #2
+	if err == nil {
+		t.Fatal("two distinct anonymous bindings clashing on a chord must conflict")
+	}
+	var ce *ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected a *ConflictError, got %T: %v", err, err)
+	}
+	// #1 must NOT have been mutated by the rejected rebind.
+	if _, ok := r.Match(ctrl('n')); !ok {
+		t.Fatal("a rejected rebind must leave the first anonymous binding on Ctrl+N")
+	}
+}
+
+// ConflictFor excludes nothing, so a customizer pre-warning with the edited action's
+// OWN current chord gets that action back as the holder (documented round-2 behaviour);
+// the UI is expected to ignore a holder equal to the action being edited.
+func TestConflictForReturnsEditedActionAsHolder(t *testing.T) {
+	r := NewBindingRegistry()
+	r.Register(KeyBinding{Chord: chordCtrl('r'), ActionID: "view.refresh"}, nil)
+	if holder, ok := r.ConflictFor(chordCtrl('r'), ScopeGlobal); !ok || holder != "view.refresh" {
+		t.Fatalf("ConflictFor on an action's own chord must return that action: %q ok=%v", holder, ok)
+	}
+	// Rebind, by contrast, excludes the target and treats the same chord as a no-op.
+	if err := r.Rebind("view.refresh", chordCtrl('r')); err != nil {
+		t.Fatalf("Rebind onto own chord must be a no-op success, got %v", err)
+	}
+}
+
 // --- ConflictFor: the non-mutating query for the customizer's pre-commit warning. ---
 
 func TestConflictForReportsHolderWithoutMutating(t *testing.T) {
