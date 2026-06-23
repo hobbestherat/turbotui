@@ -120,6 +120,14 @@ type VisualComponent struct {
 	// violated by a stray field write; read it through Focused().
 	hasFocus bool
 
+	// activatesOnEnter marks a widget whose Enter keystroke triggers a consequential
+	// activation (a push Button). The desktop uses it to scope the modal Enter-grace
+	// (gogent#347): while a freshly shown modal is in its grace window, Enter is
+	// swallowed only for such a focused widget, so a non-button field still bubbles
+	// Enter to a dialog's default/cancel handler and a text input still edits. Set by
+	// the widget constructor (NewButton); read by the desktop's enter-grace check.
+	activatesOnEnter bool
+
 	// abs is the cached AbsoluteBounds() result and absCached marks it valid. It is
 	// recomputed lazily (and cached) on the first call after a bounds/parent
 	// change, so repeated calls within a frame are O(1) instead of O(depth).

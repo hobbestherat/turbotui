@@ -9,11 +9,10 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
-// DefaultModalEnterGrace is the conventional modal Enter-grace window (gogent#347):
-// the span after a modal appears during which Enter is ignored for its focused button.
-// It is not applied automatically — pass it (or any duration) to Desktop.SetEnterGrace
-// to enable the grace; the default grace is 0 (disabled), so existing behaviour is
-// unchanged until a consumer opts in.
+// DefaultModalEnterGrace is the modal Enter-grace window (gogent#347): the span after
+// a modal appears during which Enter is ignored for its focused button. It is the
+// desktop's default (every NewDesktop starts with it), so all modal dialogs benefit
+// without per-app wiring; SetEnterGrace overrides it (0 disables the grace entirely).
 const DefaultModalEnterGrace = 300 * time.Millisecond
 
 // Desktop threading contract: the desktop and the widgets it hosts are driven by
@@ -59,8 +58,10 @@ type Desktop struct {
 	// it via SetClock so grace/typing windows are deterministic without wall-clock
 	// sleeps. now() reads it (falling back to time.Now when nil).
 	nowFn func() time.Time
-	// enterGrace is the modal Enter-grace window (gogent#347). 0 disables suppression
-	// (the default), preserving existing behaviour; SetEnterGrace turns it on.
+	// enterGrace is the modal Enter-grace window (gogent#347), defaulting to
+	// DefaultModalEnterGrace so the safety applies toolkit-wide; SetEnterGrace overrides
+	// it and 0 disables suppression. It only ever affects a focused button on an armed
+	// modal, so non-modal layers and non-button focus are untouched.
 	enterGrace time.Duration
 	// lastInputAt is the timestamp of the most recent text input the focused widget
 	// consumed (gogent#346), stamped from now(). RecentlyTyped queries it so a consumer
@@ -73,6 +74,7 @@ func NewDesktop(app *tui.App) *Desktop {
 		app:            app,
 		theme:          DefaultTheme,
 		backgroundCell: tui.Cell{Ch: ' ', FG: activeTheme.DesktopFG, BG: activeTheme.DesktopBG},
+		enterGrace:     DefaultModalEnterGrace,
 	}
 	app.OnResize(func(event tui.ResizeEvent) {
 		desktop.handleResize(event)
@@ -164,13 +166,13 @@ func (d *Desktop) SetClock(now func() time.Time) {
 	d.nowFn = now
 }
 
-// SetEnterGrace sets the modal Enter-grace window (gogent#347): for this long after a
-// modal layer is shown, Enter is ignored for the focused widget so an Enter the user
-// had already begun (e.g. submitting a message) cannot activate a freshly-appeared
-// dialog button. Escape, mouse clicks, every non-Enter key, and Enter after the window
-// elapses all work normally. A duration of 0 (the default) disables suppression, so the
-// mechanism is additive — nothing changes until a consumer opts in. Pass
-// DefaultModalEnterGrace for the conventional ~300ms window.
+// SetEnterGrace overrides the modal Enter-grace window (gogent#347): for this long
+// after a modal layer is shown, Enter is ignored for a focused button so an Enter the
+// user had already begun (e.g. submitting a message) cannot activate a freshly-appeared
+// dialog button. Escape, mouse clicks, every non-Enter key, Enter on a non-button field
+// (which still bubbles to a dialog's default handler), and Enter after the window
+// elapses all work normally. The desktop already defaults to DefaultModalEnterGrace, so
+// this is for tuning (or, with 0, disabling) the window rather than enabling it.
 func (d *Desktop) SetEnterGrace(grace time.Duration) {
 	d.enterGrace = grace
 }
@@ -282,9 +284,12 @@ func (d *Desktop) AddLayer(layer *Layer) {
 	}
 	if layer.Modal {
 		// Remember the pre-modal focus on the layer itself so closing it can restore
-		// that widget, and arm the Enter-grace window from the (injectable) clock.
+		// that widget (gogent#348), and arm the Enter-grace window from the (injectable)
+		// clock unless the layer opted out (user-initiated dialogs, gogent#347).
 		layer.restoreFocus = d.focused
-		layer.armedAt = d.now()
+		if !layer.NoEnterGrace {
+			layer.armedAt = d.now()
+		}
 	}
 	if layer.FullScreen {
 		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
@@ -855,11 +860,11 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// never leak to an off-screen widget.
 	if d.focused != nil && d.focused.visibleInTree() {
 		// Modal Enter-grace (gogent#347): for a short window after a modal appears,
-		// swallow Enter so a keystroke the user had already begun (e.g. submitting a
-		// message) cannot activate the freshly-focused dialog button. Only Enter is
-		// affected — every other key still reaches the widget below, and Escape, mouse
-		// clicks, and Enter after the grace elapses all work normally. Disabled (and
-		// thus a no-op) unless SetEnterGrace turned it on.
+		// swallow Enter for a focused button so a keystroke the user had already begun
+		// (e.g. submitting a message) cannot activate the freshly-focused dialog button.
+		// Only Enter on a button is affected — every other key reaches the widget below,
+		// and Escape, mouse clicks, a focused field/input, and Enter after the grace
+		// elapses all work normally. enterSuppressed encodes the full condition.
 		if event.Key == tui.KeyEnter && d.enterSuppressed() {
 			return
 		}
@@ -995,18 +1000,19 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 	}
 }
 
-// enterSuppressed reports whether Enter should currently be swallowed for the focused
-// widget under the modal Enter-grace (gogent#347): the grace must be enabled, the top
-// input layer must be an armed modal, and less than the grace duration must have
-// elapsed since it was armed (measured on the injectable clock). A focused text-entry
-// field is exempt — there Enter means newline/submit rather than button activation, and
-// the grace only guards against an accidental activation of a freshly-focused button,
-// so suppressing Enter in a focused input would needlessly block legitimate editing.
+// enterSuppressed reports whether Enter should currently be swallowed under the modal
+// Enter-grace (gogent#347): the grace must be enabled, the focused widget must be a
+// button (the only consequential Enter-activation #347 guards), the top input layer must
+// be an armed modal, and less than the grace duration must have elapsed since it was
+// armed (measured on the injectable clock). Scoping to a focused button means a focused
+// text input still edits and a focused non-button field still bubbles Enter to a
+// dialog's default/cancel handler — only the dangerous case (a freshly auto-focused
+// button) is held off.
 func (d *Desktop) enterSuppressed() bool {
 	if d.enterGrace <= 0 {
 		return false
 	}
-	if d.focusedIsTextInput() {
+	if d.focused == nil || !d.focused.activatesOnEnter {
 		return false
 	}
 	top := d.topInputLayer()
@@ -1018,9 +1024,8 @@ func (d *Desktop) enterSuppressed() bool {
 
 // focusedIsTextInput reports whether the focused widget is a text-entry field: it
 // exposes a text caret via CursorFn, as TextBox and MultiLineInput do and a Button or
-// Checkbox does not. It scopes both the typing-awareness signal (gogent#346 — so
-// activating a focused button does not register as the user typing) and the Enter-grace
-// exemption (gogent#347 — so Enter still edits a focused field during the grace window).
+// Checkbox does not. It scopes the typing-awareness signal (gogent#346) so activating a
+// focused button does not register as the user typing into an input.
 func (d *Desktop) focusedIsTextInput() bool {
 	return d.focused != nil && d.focused.CursorFn != nil
 }

@@ -18,6 +18,13 @@ type Layer struct {
 	// contents. FullScreen layers are stretched automatically and do not receive
 	// it (issue #71).
 	OnResize func(Rect)
+	// NoEnterGrace, when set on a Modal layer before AddLayer, opts the layer out of
+	// the modal Enter-grace (gogent#347): the desktop will not arm it, so Enter
+	// activates its focused button immediately. It is for user-initiated dialogs
+	// (e.g. ShowConfirmYesNo) that appear in direct response to a user action and so
+	// cannot interrupt mid-keystroke — #347 scopes those out of the grace, which is
+	// meant for background-triggered modals.
+	NoEnterGrace bool
 	// window is the Window this layer hosts (directly or via a Dialog), when any.
 	// It lets the desktop hand the window a back-reference so Window.Close and
 	// bounds constraints work without the app threading the layer through itself.
