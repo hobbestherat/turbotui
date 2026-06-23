@@ -56,16 +56,31 @@ func (c Chord) Matches(event tui.TypeEvent) bool {
 }
 
 // conflictsWith reports whether c and other collide: i.e. whether some single event
-// would Match both. Two chords collide when they share the same named Key, the same
-// rune compared case-insensitively (so Ctrl+R and Ctrl+r are one chord), and the same
-// Ctrl/Shift/Alt modifiers. This is the equality the registry's conflict service uses
-// to decide whether two bindings fight over the same combination.
+// would Match both. Two chords collide when they constrain the same effective named-key
+// axis (see effectiveKey), carry the same rune compared case-insensitively (so Ctrl+R
+// and Ctrl+r are one chord), and share the same Ctrl/Shift/Alt modifiers. This is the
+// equality the registry's conflict service uses to decide whether two bindings fight
+// over the same combination.
 func (c Chord) conflictsWith(other Chord) bool {
-	return c.Key == other.Key &&
+	return c.effectiveKey() == other.effectiveKey() &&
 		unicodeLower(c.Rune) == unicodeLower(other.Rune) &&
 		c.Ctrl == other.Ctrl &&
 		c.Shift == other.Shift &&
 		c.Alt == other.Alt
+}
+
+// effectiveKey is the named-key axis a chord actually constrains, normalised so the two
+// equivalent spellings of a printable/control chord compare equal. Chord.Matches forces
+// event.Key == KeyRune whenever Rune is non-zero, so a rune-bearing chord constrains the
+// KeyRune axis regardless of whether its Key field was left KeyUnknown (the wildcard) or
+// set explicitly to KeyRune. Without this normalisation {Rune:'n', Ctrl:true} and
+// {Key:KeyRune, Rune:'n', Ctrl:true} — which Match exactly the same events — would be
+// treated as non-conflicting, so the conflict service could miss a real overlap.
+func (c Chord) effectiveKey() tui.KeyCode {
+	if c.Rune != 0 {
+		return tui.KeyRune
+	}
+	return c.Key
 }
 
 // Deliverable reports whether this chord can actually be delivered to the application
@@ -412,28 +427,45 @@ func (e *ConflictError) Error() string {
 // different dispatch positions). Chord equality is case-insensitive on the rune and
 // exact on the named key and Ctrl/Shift/Alt modifiers (see Chord.conflictsWith).
 func (r *BindingRegistry) ConflictFor(chord Chord, scope Scope) (ActionID, bool) {
-	return r.conflictFor(chord, scope, -1)
+	return r.conflictForExcluding(chord, scope, "")
 }
 
-// conflictFor is the shared lookup behind ConflictFor and Rebind. It returns the first
-// registered binding (other than excludeIdx) in the given scope whose chord collides
-// with chord. excludeIdx is the entry being rebound, skipped so that rebinding an
-// action onto a chord it already holds is not reported as a self-conflict; pass -1 to
-// consider every entry.
-func (r *BindingRegistry) conflictFor(chord Chord, scope Scope, excludeIdx int) (ActionID, bool) {
+// conflictForExcluding is the shared lookup behind ConflictFor and Rebind. It returns
+// the first registered binding in scope whose chord collides with chord, skipping every
+// entry whose ActionID equals exclude. A binding never conflicts with its own action's
+// other entries, so Rebind passes the action being rebound (so rebinding an action onto
+// a chord it already holds is a no-op success, not a self-conflict) and ConflictFor
+// passes the empty ActionID to consider every entry. Skipping by ActionID rather than by
+// index also means an action registered more than once can never be reported as
+// conflicting with itself — which would be a nonsensical Holder == ActionID error.
+func (r *BindingRegistry) conflictForExcluding(chord Chord, scope Scope, exclude ActionID) (ActionID, bool) {
 	for i := range r.entries {
-		if i == excludeIdx {
+		binding := r.entries[i].binding
+		if binding.Scope != scope {
 			continue
 		}
-		entry := r.entries[i]
-		if entry.binding.Scope != scope {
+		if exclude != "" && binding.ActionID == exclude {
 			continue
 		}
-		if entry.binding.Chord.conflictsWith(chord) {
-			return entry.binding.ActionID, true
+		if binding.Chord.conflictsWith(chord) {
+			return binding.ActionID, true
 		}
 	}
 	return "", false
+}
+
+// BindingFor returns the first binding registered for actionID. It is the read side of
+// the conflict service the customizer UI needs: to render "action … current binding"
+// and to resolve the row it is about to rebind. ok is false when no binding carries
+// actionID. When an action is registered more than once (e.g. in two scopes) the first
+// registered binding is returned, mirroring which entry Rebind targets.
+func (r *BindingRegistry) BindingFor(actionID ActionID) (KeyBinding, bool) {
+	for i := range r.entries {
+		if r.entries[i].binding.ActionID == actionID {
+			return r.entries[i].binding, true
+		}
+	}
+	return KeyBinding{}, false
 }
 
 // Rebind changes the chord of the binding identified by actionID to chord, enforcing
@@ -450,8 +482,10 @@ func (r *BindingRegistry) conflictFor(chord Chord, scope Scope, excludeIdx int) 
 //     and a *ConflictError naming that holder is returned.
 //   - actionID is not registered → a descriptive error is returned and nothing changes.
 //
-// Rebind matches the first binding registered with actionID; register a distinct
-// ActionID per rebindable action so the target is unambiguous.
+// Rebind matches the FIRST binding registered with actionID and only that binding;
+// register a distinct, non-empty ActionID per rebindable action so the target is
+// unambiguous. The conflict check ignores every entry sharing actionID, so an action
+// registered more than once is never reported as conflicting with itself.
 func (r *BindingRegistry) Rebind(actionID ActionID, chord Chord) error {
 	idx := -1
 	for i := range r.entries {
@@ -464,7 +498,7 @@ func (r *BindingRegistry) Rebind(actionID ActionID, chord Chord) error {
 		return fmt.Errorf("rebind: no binding registered for action %q", actionID)
 	}
 	scope := r.entries[idx].binding.Scope
-	if holder, ok := r.conflictFor(chord, scope, idx); ok {
+	if holder, ok := r.conflictForExcluding(chord, scope, actionID); ok {
 		return &ConflictError{Chord: chord, Scope: scope, ActionID: actionID, Holder: holder}
 	}
 	r.entries[idx].binding.Chord = chord

@@ -1164,6 +1164,13 @@ func parseOneInput(data []byte) (any, int, bool) {
 // Ctrl+M is {Key: KeyRune, Rune: 'm', Ctrl: true}; the function reports that it is
 // indistinguishable from Enter. Ordinary combinations (Ctrl+N, Ctrl+F, plain letters,
 // arrows, function keys) report ok=true with an empty reason.
+//
+// The Alt modifier is accepted but intentionally does not lift the Ctrl verdicts: the
+// OS/terminal-level captures (XON/XOFF flow control, SIGTSTP job control) and the
+// CR/TAB/ESC byte-collapsing all act on the raw control byte itself, which an Alt (ESC)
+// prefix still leaves in the input stream — so e.g. Ctrl+Alt+S is undeliverable for the
+// same reason as Ctrl+S. An Alt modifier on an already-deliverable combo stays
+// deliverable (Alt is just a prefix there).
 func Deliverability(key KeyCode, r rune, ctrl, shift, alt bool) (ok bool, reason string) {
 	if !ctrl {
 		// Without Ctrl there is no C0 collapsing and no job/flow-control capture;
@@ -1185,7 +1192,12 @@ func Deliverability(key KeyCode, r rune, ctrl, shift, alt bool) (ok bool, reason
 		return false, "Ctrl+Shift+letter is indistinguishable from Ctrl+letter on most terminals"
 	}
 	switch {
-	case key == KeyEnter || lower == 'm':
+	case lower == 'm':
+		// Ctrl+M (the rune chord) collapses to carriage return, which the decoder
+		// folds into a plain Enter. Note this is NOT Ctrl+Enter: the decoder
+		// deliberately surfaces LF/^J as a distinct {Key: KeyEnter, Ctrl: true} submit
+		// key, so that named-key chord is deliverable and is intentionally not caught
+		// here.
 		return false, "Ctrl+M is indistinguishable from Enter (both arrive as carriage return)"
 	case key == KeyTab || lower == 'i':
 		return false, "Ctrl+I is indistinguishable from Tab (both arrive as horizontal tab)"
