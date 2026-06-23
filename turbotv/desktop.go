@@ -29,6 +29,11 @@ type Desktop struct {
 	focused        *VisualComponent
 	mouseCapture   *VisualComponent
 	menuBar        *MenuBar
+	// bindings is the desktop's durable BindingRegistry for the Focus and
+	// Fallthrough scopes (see ScopedBindings). Unlike the menubar's Global registry
+	// (Bindings), it is NOT reset by a menu rebuild, so scoped bindings an app
+	// registers survive RebuildBindings. It is lazily created by ScopedBindings.
+	bindings       *BindingRegistry
 	unhandledKeyFn func(event tui.TypeEvent)
 	onResize       []func()
 	// onActiveLayerChange is fired when the top input layer changes; lastNotifiedTop
@@ -148,8 +153,13 @@ func (d *Desktop) SetMenuBar(bar *MenuBar) {
 // Phase-1 caveat: the instance is stable, but its contents are owned by the menu
 // tree. A caller may Register an extra binding and it persists until the next
 // RebuildBindings, which resets the registry to the menu bindings and drops the
-// extra. Durable non-menu scopes (Focus/Fallthrough) are a phase-2 concern; until
-// then do not rely on a registration outliving a menu rebuild.
+// extra. For durable non-menu scopes (Focus/Fallthrough) use ScopedBindings, which
+// survives a menu rebuild.
+//
+// Scope correspondence: this registry is the Global scope. Its consumers (Match,
+// Dispatch via HandleAccelerator) only ever surface ScopeGlobal bindings, so a
+// Focus or Fallthrough binding registered here is inert — it will not fire as a
+// global accelerator. Register scoped bindings into ScopedBindings instead.
 //
 // Like the rest of the desktop, the registry is loop-confined: query or mutate it
 // (Match/Register/Clear) only on the event-loop goroutine or via Post, since the
@@ -159,6 +169,33 @@ func (d *Desktop) Bindings() *BindingRegistry {
 		return nil
 	}
 	return d.menuBar.Registry()
+}
+
+// ScopedBindings returns the desktop's durable BindingRegistry for the Focus and
+// Fallthrough scopes, creating it on first use (it is never nil). This is the
+// phase-2 home the Bindings() doc anticipated: bindings registered here outlive a
+// menu RebuildBindings, because they belong to the desktop, not the menu tree.
+//
+// handleType consults it at two existing dispatch positions: ScopeFocus bindings at
+// the focused-widget stage (after the focused widget declines the key, scoped to the
+// binding's Target via focus-within) and ScopeFallthrough bindings at the
+// unhandledKeyFn stage (before the app's unhandled-key handler). With nothing
+// registered here both checks are inert, so the dispatch chain is unchanged.
+//
+// Use Bindings() for Global menu accelerators; register Focus/Fallthrough bindings
+// here. Scope correspondence: this registry is consulted ONLY through DispatchFocus
+// and DispatchFallthrough, so a ScopeGlobal binding registered here is inert (it
+// fires nowhere — register Global accelerators on the menu via Bindings()). The
+// mismatch is benign (dead, not dangerous) but silent, so keep each scope in its
+// own registry.
+//
+// Like the rest of the desktop, the registry is loop-confined: query or mutate it
+// only on the event-loop goroutine or via Post (see the Desktop threading contract).
+func (d *Desktop) ScopedBindings() *BindingRegistry {
+	if d.bindings == nil {
+		d.bindings = NewBindingRegistry()
+	}
+	return d.bindings
 }
 
 // AddLayer pushes a layer onto the top of the stack. Must be called on the event
@@ -697,6 +734,14 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			d.RequestRedraw()
 			return
 		}
+		// Focus-scope bindings: consulted only after the focused widget itself
+		// declines the key, and only for a binding whose Target contains the focused
+		// component (focus-within). No Focus bindings are registered by default, so
+		// this is inert and the focused-widget stage behaves exactly as before.
+		if d.bindings != nil && d.bindings.DispatchFocus(event, d.focused) {
+			d.RequestRedraw()
+			return
+		}
 	}
 	switch event.Key {
 	case tui.KeyTab:
@@ -712,6 +757,14 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			d.RequestRedraw()
 			return
 		}
+	}
+	// Fallthrough-scope bindings run at the app-fallthrough point, before the
+	// app's unhandledKeyFn — the same dispatch position the app's global shortcuts
+	// occupy. No Fallthrough bindings are registered by default, so this is inert and
+	// the unhandledKeyFn/quit tail behaves exactly as before.
+	if d.bindings != nil && d.bindings.DispatchFallthrough(event) {
+		d.RequestRedraw()
+		return
 	}
 	if d.unhandledKeyFn != nil {
 		d.unhandledKeyFn(event)
