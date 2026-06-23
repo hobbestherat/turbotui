@@ -4,9 +4,17 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	tui "github.com/hobbestherat/turbotui"
 )
+
+// DefaultModalEnterGrace is the conventional modal Enter-grace window (gogent#347):
+// the span after a modal appears during which Enter is ignored for its focused button.
+// It is not applied automatically — pass it (or any duration) to Desktop.SetEnterGrace
+// to enable the grace; the default grace is 0 (disabled), so existing behaviour is
+// unchanged until a consumer opts in.
+const DefaultModalEnterGrace = 300 * time.Millisecond
 
 // Desktop threading contract: the desktop and the widgets it hosts are driven by
 // a single goroutine — the App event loop. Input handlers, the coalesced redraw
@@ -46,6 +54,23 @@ type Desktop struct {
 	// cancel stops the run loop; it backs the default Ctrl+C quit (issue #75) and is
 	// set by Run.
 	cancel context.CancelFunc
+	// nowFn is the injectable time source backing the modal Enter-grace (gogent#347)
+	// and typing-awareness (gogent#346) clocks. It defaults to time.Now; tests replace
+	// it via SetClock so grace/typing windows are deterministic without wall-clock
+	// sleeps. now() reads it (falling back to time.Now when nil).
+	nowFn func() time.Time
+	// enterGrace is the modal Enter-grace window (gogent#347). 0 disables suppression
+	// (the default), preserving existing behaviour; SetEnterGrace turns it on.
+	enterGrace time.Duration
+	// focusHistory is the modal focus-restore stack (gogent#348). AddLayer pushes the
+	// pre-modal focused widget when a Modal layer is added; RemoveLayer/RemoveTopLayer
+	// pops it and re-focuses that widget if it is still focusable in the new top layer,
+	// else falls back to the clear-to-nil ensureFocusInTopLayer behaviour.
+	focusHistory []*VisualComponent
+	// lastInputAt is the timestamp of the most recent text input the focused widget
+	// consumed (gogent#346), stamped from now(). RecentlyTyped queries it so a consumer
+	// can defer focus-stealing modals while the user is actively typing.
+	lastInputAt time.Time
 }
 
 func NewDesktop(app *tui.App) *Desktop {
@@ -125,6 +150,55 @@ func (d *Desktop) SetBackground(cell tui.Cell) {
 	d.backgroundCell = cell
 }
 
+// now returns the current time from the injectable clock, falling back to the wall
+// clock when none was set. It is the single time source for the modal Enter-grace
+// (gogent#347) and typing-awareness (gogent#346) windows.
+func (d *Desktop) now() time.Time {
+	if d.nowFn != nil {
+		return d.nowFn()
+	}
+	return time.Now()
+}
+
+// SetClock replaces the desktop's time source, used by the modal Enter-grace and the
+// typing-awareness query. Pass nil to restore the wall clock (time.Now). It exists so
+// tests can drive grace/typing windows deterministically without real sleeps; apps
+// normally leave it at the default. Like the rest of the desktop it is loop-confined —
+// set it before Run or via Post.
+func (d *Desktop) SetClock(now func() time.Time) {
+	d.nowFn = now
+}
+
+// SetEnterGrace sets the modal Enter-grace window (gogent#347): for this long after a
+// modal layer is shown, Enter is ignored for the focused widget so an Enter the user
+// had already begun (e.g. submitting a message) cannot activate a freshly-appeared
+// dialog button. Escape, mouse clicks, every non-Enter key, and Enter after the window
+// elapses all work normally. A duration of 0 (the default) disables suppression, so the
+// mechanism is additive — nothing changes until a consumer opts in. Pass
+// DefaultModalEnterGrace for the conventional ~300ms window.
+func (d *Desktop) SetEnterGrace(grace time.Duration) {
+	d.enterGrace = grace
+}
+
+// EnterGrace reports the current modal Enter-grace window (0 when disabled).
+func (d *Desktop) EnterGrace() time.Duration {
+	return d.enterGrace
+}
+
+// RecentlyTyped reports whether the user typed into the focused widget less than
+// `within` ago (gogent#346). It is the minimal typing-awareness signal a consumer uses
+// to defer a background-triggered modal while the user is mid-keystroke: text runes
+// (without Ctrl/Alt), Backspace, Delete, and pastes the focused widget consumed all
+// count as typing; navigation, shortcuts, and Enter do not. The signal decays purely by
+// elapsed time, so it self-clears once the user goes idle. Returns false when nothing
+// has been typed yet.
+func (d *Desktop) RecentlyTyped(within time.Duration) bool {
+	if d.lastInputAt.IsZero() {
+		return false
+	}
+	return d.now().Sub(d.lastInputAt) < within
+}
+
 // SetMenuBar registers the application menubar. The desktop owns it: it is drawn
 // on top of every layer and receives global shortcuts (Alt-mnemonics and
 // Ctrl-accelerators) and keyboard navigation while open. Do NOT also add it to a
@@ -200,12 +274,22 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 
 // AddLayer pushes a layer onto the top of the stack. Must be called on the event
 // loop or via Post (see the Desktop threading contract).
+//
+// A Modal layer additionally (a) pushes the currently-focused widget onto the focus-
+// history stack so closing the modal can restore it (gogent#348), and (b) is armed with
+// the current clock time for the Enter-grace window (gogent#347).
 func (d *Desktop) AddLayer(layer *Layer) {
 	d.layersMu.Lock()
 	d.layers = append(d.layers, layer)
 	d.layersMu.Unlock()
 	if layer.window != nil {
 		layer.window.desktop = d
+	}
+	if layer.Modal {
+		// Remember the pre-modal focus so RemoveLayer can restore it, and arm the
+		// Enter-grace window from the (injectable) clock.
+		d.focusHistory = append(d.focusHistory, d.focused)
+		layer.armedAt = d.now()
 	}
 	if layer.FullScreen {
 		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
@@ -386,9 +470,10 @@ func (d *Desktop) RemoveTopLayer() {
 		d.layersMu.Unlock()
 		return
 	}
+	removed := d.layers[len(d.layers)-1]
 	d.layers = d.layers[:len(d.layers)-1]
 	d.layersMu.Unlock()
-	d.ensureFocusInTopLayer()
+	d.restoreFocusAfterRemoval(removed)
 	d.notifyActiveLayerChange()
 	d.Redraw()
 }
@@ -400,18 +485,59 @@ func (d *Desktop) RemoveLayer(layer *Layer) {
 		return
 	}
 	d.layersMu.Lock()
+	removed := false
 	next := make([]*Layer, 0, len(d.layers))
 	for _, existing := range d.layers {
 		if existing == layer {
+			removed = true
 			continue
 		}
 		next = append(next, existing)
 	}
 	d.layers = next
 	d.layersMu.Unlock()
-	d.ensureFocusInTopLayer()
+	if removed {
+		d.restoreFocusAfterRemoval(layer)
+	} else {
+		d.ensureFocusInTopLayer()
+	}
 	d.notifyActiveLayerChange()
 	d.Redraw()
+}
+
+// restoreFocusAfterRemoval re-homes keyboard focus once `removed` has left the stack.
+// For a Modal layer it pops the focus-history stack (gogent#348) and re-focuses the
+// widget that held focus before the modal opened, provided it is still focusable in the
+// new top layer; otherwise — and for every non-modal layer — it falls back to the
+// existing clear-to-nil ensureFocusInTopLayer behaviour, leaving non-modal removal
+// unchanged.
+func (d *Desktop) restoreFocusAfterRemoval(removed *Layer) {
+	if removed == nil || !removed.Modal {
+		d.ensureFocusInTopLayer()
+		return
+	}
+	var prev *VisualComponent
+	if n := len(d.focusHistory); n > 0 {
+		prev = d.focusHistory[n-1]
+		d.focusHistory = d.focusHistory[:n-1]
+	}
+	if prev != nil && d.focusableInTopLayer(prev) {
+		d.setFocus(prev)
+		return
+	}
+	d.ensureFocusInTopLayer()
+}
+
+// focusableInTopLayer reports whether c is currently a focusable widget within the top
+// input layer (visible, enabled, and focus-ordered there) — the test used to decide
+// whether a remembered pre-modal widget can be re-focused after a modal closes.
+func (d *Desktop) focusableInTopLayer(c *VisualComponent) bool {
+	for _, item := range d.focusablesInTopLayer() {
+		if item == c {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Desktop) TopLayer() *Layer {
@@ -730,7 +856,21 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
 	// never leak to an off-screen widget.
 	if d.focused != nil && d.focused.visibleInTree() {
+		// Modal Enter-grace (gogent#347): for a short window after a modal appears,
+		// swallow Enter so a keystroke the user had already begun (e.g. submitting a
+		// message) cannot activate the freshly-focused dialog button. Only Enter is
+		// affected — every other key still reaches the widget below, and Escape, mouse
+		// clicks, and Enter after the grace elapses all work normally. Disabled (and
+		// thus a no-op) unless SetEnterGrace turned it on.
+		if event.Key == tui.KeyEnter && d.enterSuppressed() {
+			return
+		}
 		if d.focused.BubbleType(event) {
+			// Typing-awareness (gogent#346): record when the focused widget consumes a
+			// text-editing key so RecentlyTyped can report the user is mid-keystroke.
+			if isTypingKey(event) {
+				d.lastInputAt = d.now()
+			}
 			d.RequestRedraw()
 			return
 		}
@@ -846,7 +986,39 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 		return
 	}
 	if d.focused.BubblePaste(event.Text) {
+		// A consumed paste is text input, so it counts toward typing-awareness
+		// (gogent#346) just like keystrokes do.
+		d.lastInputAt = d.now()
 		d.RequestRedraw()
+	}
+}
+
+// enterSuppressed reports whether Enter should currently be swallowed for the focused
+// widget under the modal Enter-grace (gogent#347): the grace must be enabled, the top
+// input layer must be an armed modal, and less than the grace duration must have
+// elapsed since it was armed (measured on the injectable clock).
+func (d *Desktop) enterSuppressed() bool {
+	if d.enterGrace <= 0 {
+		return false
+	}
+	top := d.topInputLayer()
+	if top == nil || !top.Modal || top.armedAt.IsZero() {
+		return false
+	}
+	return d.now().Sub(top.armedAt) < d.enterGrace
+}
+
+// isTypingKey reports whether a key event represents text input into a field (a
+// printable rune without Ctrl/Alt, or Backspace/Delete) as opposed to navigation,
+// shortcuts, or activation. It gates the typing-awareness timestamp (gogent#346).
+func isTypingKey(event tui.TypeEvent) bool {
+	switch event.Key {
+	case tui.KeyRune:
+		return !event.Ctrl && !event.Alt
+	case tui.KeyBackspace, tui.KeyDelete:
+		return true
+	default:
+		return false
 	}
 }
 

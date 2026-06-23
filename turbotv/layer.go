@@ -1,5 +1,7 @@
 package tv
 
+import "time"
+
 type Layer struct {
 	Name        string
 	Root        *VisualComponent
@@ -20,6 +22,27 @@ type Layer struct {
 	// It lets the desktop hand the window a back-reference so Window.Close and
 	// bounds constraints work without the app threading the layer through itself.
 	window *Window
+	// armedAt is the modal Enter-grace timestamp (gogent#347). The desktop stamps it
+	// from its (injectable) clock when a Modal layer is added, marking the instant the
+	// modal appeared. While the desktop's enter-grace window has not yet elapsed since
+	// armedAt, Desktop.handleType swallows Enter for the focused widget so a keystroke
+	// the user had already begun before the modal popped up cannot activate its button.
+	// Zero means "never armed" (no suppression). See Desktop.SetEnterGrace.
+	armedAt time.Time
+}
+
+// Arm sets the layer's Enter-grace timestamp (gogent#347). Modal layers are armed
+// automatically by Desktop.AddLayer from the desktop clock; call this to re-arm an
+// already-shown modal (e.g. when it is re-presented) or to arm deterministically in a
+// test by passing a fixed time. The grace duration itself is set on the desktop with
+// SetEnterGrace.
+func (l *Layer) Arm(at time.Time) {
+	l.armedAt = at
+}
+
+// ArmedAt reports the layer's current Enter-grace timestamp (zero when never armed).
+func (l *Layer) ArmedAt() time.Time {
+	return l.armedAt
 }
 
 // hasWindow is implemented by roots that own a Window (Window itself and Dialog),
