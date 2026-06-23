@@ -694,6 +694,13 @@ func (p *ColorPicker) popupScroll(_ *VisualComponent, event tui.ScrollEvent) boo
 
 func (p *ColorPicker) popupClick(_ *VisualComponent, event tui.ClickEvent) bool {
 	lay := p.layout()
+	// Hit regions must match what is actually painted: rendering clips the grid
+	// and slider content to lay.inner, so a row the layout pushed past the
+	// interior (onto the frame, or off a short popup) is invisible and must not be
+	// interactive either. Intersecting with lay.inner keeps input and rendering in
+	// agreement instead of leaving clipped rows silently clickable.
+	gridHit := lay.grid.Intersect(lay.inner)
+	sliderHit := lay.sliders.Intersect(lay.inner)
 	// Route presses/drags on the grid scrollbar to scrolling, not picking.
 	if lay.scrollbar {
 		track := Rect{X: lay.inner.X + lay.inner.W - 1, Y: lay.grid.Y, W: 1, H: lay.visRows}
@@ -707,7 +714,7 @@ func (p *ColorPicker) popupClick(_ *VisualComponent, event tui.ClickEvent) bool 
 	if event.Down {
 		return true
 	}
-	if lay.grid.Contains(event.X, event.Y) {
+	if gridHit.Contains(event.X, event.Y) {
 		col := (event.X - lay.grid.X) / colorSwatchW
 		row := p.offset + (event.Y - lay.grid.Y)
 		index := row*p.cols + col
@@ -716,7 +723,7 @@ func (p *ColorPicker) popupClick(_ *VisualComponent, event tui.ClickEvent) bool 
 		}
 		return true
 	}
-	if lay.sliders.H > 0 && lay.sliders.Contains(event.X, event.Y) {
+	if sliderHit.Contains(event.X, event.Y) {
 		p.clickSlider(event, lay)
 		return true
 	}
