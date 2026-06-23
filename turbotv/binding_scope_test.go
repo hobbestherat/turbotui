@@ -173,12 +173,14 @@ func TestMatchFallthroughIgnoresFocus(t *testing.T) {
 func TestScopeLookupsAreMutuallyIsolated(t *testing.T) {
 	r := NewBindingRegistry()
 	window := NewComponent(Rect{X: 0, Y: 0, W: 40, H: 12})
-	gChord := Chord{Key: tui.KeyRune, Rune: 'g'}
-	fChord := Chord{Key: tui.KeyRune, Rune: 'g'}
-	tChord := Chord{Key: tui.KeyRune, Rune: 'g'}
-	r.Register(KeyBinding{Chord: gChord, ActionID: "global", Scope: ScopeGlobal}, nil)
-	r.Register(KeyBinding{Chord: fChord, ActionID: "focus", Scope: ScopeFocus, Target: window}, nil)
-	r.Register(KeyBinding{Chord: tChord, ActionID: "fall", Scope: ScopeFallthrough}, nil)
+	chord := Chord{Key: tui.KeyRune, Rune: 'g'}
+	// Register the Focus binding FIRST on the shared chord so this test distinguishes
+	// a Global-only Match (the fixed contract) from a scope-agnostic one: a
+	// scope-agnostic Match would surface the first-registered Focus binding, while the
+	// Global-only Match must skip it and surface the Global binding registered later.
+	r.Register(KeyBinding{Chord: chord, ActionID: "focus", Scope: ScopeFocus, Target: window}, nil)
+	r.Register(KeyBinding{Chord: chord, ActionID: "global", Scope: ScopeGlobal}, nil)
+	r.Register(KeyBinding{Chord: chord, ActionID: "fall", Scope: ScopeFallthrough}, nil)
 
 	// MatchFocus must skip the Global and Fallthrough bindings on the same chord.
 	if got, ok := r.MatchFocus(ev('g'), window); !ok || got.ActionID != "focus" {
@@ -188,9 +190,11 @@ func TestScopeLookupsAreMutuallyIsolated(t *testing.T) {
 	if got, ok := r.MatchFallthrough(ev('g')); !ok || got.ActionID != "fall" {
 		t.Fatalf("MatchFallthrough picked %q ok=%v, want the Fallthrough-scope binding", got.ActionID, ok)
 	}
-	// The scope-agnostic Match returns the FIRST registered regardless of scope.
+	// Match is Global-only: even though a Focus binding on this chord was registered
+	// FIRST, Match skips every non-Global entry and surfaces the Global binding. A
+	// scoped binding can never leak through the menu-accelerator lookup.
 	if got, ok := r.Match(ev('g')); !ok || got.ActionID != "global" {
-		t.Fatalf("scope-agnostic Match picked %q ok=%v, want the first-registered 'global'", got.ActionID, ok)
+		t.Fatalf("Global-only Match picked %q ok=%v, want 'global' (must skip the earlier Focus binding)", got.ActionID, ok)
 	}
 }
 
