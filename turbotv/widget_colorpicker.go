@@ -466,21 +466,24 @@ func (p *ColorPicker) drawPopup(_ *VisualComponent, surface Surface) {
 		// The shadow is cast outside the box, so paint it before clipping.
 		surface.DrawShadow(lay.rect, activeTheme.WindowShadow, DefaultShadowStyle)
 	}
-	// Confine box content to the popup rect: on a narrow/short terminal the
-	// width/height clamp in popupRect can leave the grid's configured columns or
-	// the slider+preview rows reaching past the box, and the catcher is a
-	// full-screen layer (its surface clips to the screen, not the box), so without
-	// this they would overdraw neighbouring UI. Each region is then clipped to its
-	// own rect so a swatch can never bleed over the border or scrollbar column.
-	box := surface.WithClip(lay.rect)
-	box.Fill(lay.rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
-	box.DrawBox(lay.rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
+	// Paint the frame clipped to the popup rect. The catcher is a full-screen
+	// layer (its surface clips to the screen, not the box), so on a narrow/short
+	// terminal the width/height clamp in popupRect can otherwise leave content
+	// reaching past the box and overdrawing neighbouring UI.
+	frame := surface.WithClip(lay.rect)
+	frame.Fill(lay.rect, tui.Cell{Ch: ' ', FG: activeTheme.DialogFG, BG: activeTheme.DialogBG})
+	frame.DrawBox(lay.rect, tui.LineSingle, activeTheme.DialogBorderFG, activeTheme.DialogBG)
 
-	p.drawGrid(box, lay)
+	// All interior content clips to lay.inner — NOT lay.rect — so a grid column,
+	// slider row, or preview that the layout pushes onto a frame cell (e.g. a
+	// slider row landing on the bottom border on a short truecolor terminal) is
+	// clipped away instead of overwriting the border.
+	inner := surface.WithClip(lay.inner)
+	p.drawGrid(inner, lay)
 	if lay.sliders.H > 0 {
-		p.drawSliders(box.WithClip(lay.sliders), lay)
+		p.drawSliders(inner.WithClip(lay.sliders), lay)
 	}
-	p.drawPreview(box.WithClip(lay.preview), lay.preview)
+	p.drawPreview(inner.WithClip(lay.preview), lay.preview)
 }
 
 func (p *ColorPicker) drawGrid(surface Surface, lay pickerLayout) {
