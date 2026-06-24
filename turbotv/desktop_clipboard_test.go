@@ -130,6 +130,49 @@ func TestExportedPasteReadsClipboardAndBubblesToFocusedWidget(t *testing.T) {
 	}
 }
 
+func TestMenuAcceleratorPasteWorksWhileMenuIsOpen(t *testing.T) {
+	installFakeClipboardReader(t, "pbpaste", "menu paste", 0)
+	desktop, _ := newClipboardDesktop(t)
+	widget := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 1})
+	widget.Focusable = true
+	pasted := ""
+	widget.OnPasteFn = func(_ *VisualComponent, text string) bool {
+		pasted = text
+		return true
+	}
+	desktop.AddLayer(NewFullscreenLayer("base", widget))
+	desktop.SetFocus(widget)
+
+	menuSelects := 0
+	menu := NewMenuBar(
+		Rect{X: 0, Y: 0, W: 40, H: 1},
+		NewSubMenu("&Edit",
+			NewMenuItem("&Paste", func() {
+				menuSelects++
+				if !desktop.Paste() {
+					t.Fatalf("Desktop.Paste returned false from an open menu callback")
+				}
+			}).WithShortcut("Ctrl+V", tui.KeyRune, 'v', true),
+		),
+	)
+	desktop.SetMenuBar(menu)
+	if !menu.OpenTopByMnemonic('e') {
+		t.Fatalf("failed to open Edit menu")
+	}
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRune, Rune: 'v', Ctrl: true})
+
+	if menuSelects != 1 {
+		t.Fatalf("Paste menu item selected %d times, want 1", menuSelects)
+	}
+	if pasted != "menu paste" {
+		t.Fatalf("menu accelerator pasted %q, want clipboard payload", pasted)
+	}
+	if menu.IsOpen() {
+		t.Fatalf("menu should close after accelerator dispatch")
+	}
+}
+
 func TestExportedPasteNoopsOnMissingOrEmptyClipboardRead(t *testing.T) {
 	desktop, _ := newClipboardDesktop(t)
 	t.Setenv("PATH", t.TempDir())
@@ -266,5 +309,36 @@ func TestBracketedPasteStillRoutesLiteralTextWithoutClipboardReader(t *testing.T
 
 	if pasted != "literal\npaste" {
 		t.Fatalf("bracketed paste routed %q, want literal text", pasted)
+	}
+}
+
+func TestBracketedPasteStillSuppressedWhileMenuIsOpen(t *testing.T) {
+	desktop, _ := newClipboardDesktop(t)
+	widget := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 1})
+	widget.Focusable = true
+	pasteCalls := 0
+	widget.OnPasteFn = func(_ *VisualComponent, _ string) bool {
+		pasteCalls++
+		return true
+	}
+	desktop.AddLayer(NewFullscreenLayer("base", widget))
+	desktop.SetFocus(widget)
+
+	menu := NewMenuBar(
+		Rect{X: 0, Y: 0, W: 40, H: 1},
+		NewSubMenu("&Edit", NewMenuItem("&Paste", nil)),
+	)
+	desktop.SetMenuBar(menu)
+	if !menu.OpenTopByMnemonic('e') {
+		t.Fatalf("failed to open Edit menu")
+	}
+
+	desktop.handlePaste(tui.PasteEvent{Text: "bracketed"})
+
+	if pasteCalls != 0 {
+		t.Fatalf("bracketed paste reached focused widget while menu was open (%d calls), want 0", pasteCalls)
+	}
+	if !menu.IsOpen() {
+		t.Fatalf("bracketed paste should not close the menu")
 	}
 }
