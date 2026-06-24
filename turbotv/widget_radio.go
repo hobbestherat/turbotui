@@ -25,16 +25,25 @@ func NewRadioGroup() *RadioGroup {
 	return &RadioGroup{selected: -1}
 }
 
-// Add registers cb as a member and returns the group for chaining. It takes over
-// cb's OnToggle to enforce exclusion, so set any per-box reaction via OnChange
-// instead. A box that is already checked when added becomes the selection.
+// Add registers cb as a member and returns the group for chaining. It wraps cb's
+// OnToggle to enforce exclusion while still invoking any callback already set on
+// the box (set the per-box callback before Add), so a member can keep its own
+// reaction alongside the group's OnChange. The wrapped callback runs after the
+// exclusion logic and sees the box's settled checked state. A box that is already
+// checked when added becomes the selection.
 func (g *RadioGroup) Add(cb *Checkbox) *RadioGroup {
 	index := len(g.Boxes)
 	g.Boxes = append(g.Boxes, cb)
 	if cb.Checked {
 		g.applySelection(index)
 	}
-	cb.OnToggle = func(checked bool) { g.onToggle(index, checked) }
+	prev := cb.OnToggle
+	cb.OnToggle = func(checked bool) {
+		g.onToggle(index, checked)
+		if prev != nil {
+			prev(cb.Checked)
+		}
+	}
 	return g
 }
 
@@ -102,11 +111,16 @@ type MultiSelect struct {
 // NewMultiSelect creates an empty multi-select group.
 func NewMultiSelect() *MultiSelect { return &MultiSelect{} }
 
-// Add registers cb and returns the group for chaining. It takes over cb's OnToggle
-// to notify OnChange; the box's own checked state is otherwise untouched.
+// Add registers cb and returns the group for chaining. It wraps cb's OnToggle so
+// any callback already set on the box (set it before Add) still fires, then
+// notifies the group's OnChange; the box's own checked state is untouched.
 func (m *MultiSelect) Add(cb *Checkbox) *MultiSelect {
 	m.Boxes = append(m.Boxes, cb)
-	cb.OnToggle = func(bool) {
+	prev := cb.OnToggle
+	cb.OnToggle = func(checked bool) {
+		if prev != nil {
+			prev(checked)
+		}
 		if m.OnChange != nil {
 			m.OnChange()
 		}

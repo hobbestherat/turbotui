@@ -210,6 +210,11 @@ func (m *MultiLineInput) cursorPos(component *VisualComponent) (int, int, bool) 
 }
 
 func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
+	// Alt+Left/Right are container navigation (e.g. switching tv.Tabs), not text
+	// editing, so decline them and let the chord bubble to an ancestor handler.
+	if event.Alt && (event.Key == tui.KeyLeft || event.Key == tui.KeyRight) {
+		return false
+	}
 	switch event.Key {
 	case tui.KeyBackspace:
 		if m.deleteSelection() {

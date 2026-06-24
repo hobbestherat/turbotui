@@ -73,8 +73,12 @@ func NewTabs(desktop *Desktop, bounds Rect) *Tabs {
 func (t *Tabs) Root() *VisualComponent { return t.Component }
 
 // AddTab appends a page with the given title and content widget and returns the
-// Tabs for chaining. The first tab added becomes the active one.
+// Tabs for chaining. The first tab added becomes the active one. A nil content is
+// ignored (no tab is added), so callers never panic on a missing page.
 func (t *Tabs) AddTab(title string, content Widget) *Tabs {
+	if content == nil {
+		return t
+	}
 	index := len(t.tabs)
 	t.tabs = append(t.tabs, Tab{Title: title, Content: content})
 	t.content.AddChild(content)
@@ -100,13 +104,18 @@ func (t *Tabs) ActiveContent() Widget {
 }
 
 // SetActive switches to the tab at index (a no-op when out of range or already
-// active), firing OnTabChange and moving focus into the newly shown tab when focus
-// was inside the one being hidden.
+// active), firing OnTabChange. It moves focus into the newly shown tab only when
+// focus was inside the one being hidden, so a programmatic switch never steals
+// focus from an unrelated widget elsewhere on screen.
 func (t *Tabs) SetActive(index int) {
-	t.setActiveIndex(index)
+	t.setActiveIndex(index, false)
 }
 
-func (t *Tabs) setActiveIndex(index int) {
+// setActiveIndex performs the switch. enterFocus forces focus into the new tab
+// (used by the keyboard and mouse paths, where the user deliberately drove the
+// switch); otherwise focus only moves when it would otherwise be stranded on the
+// now-hidden tab.
+func (t *Tabs) setActiveIndex(index int, enterFocus bool) {
 	if index < 0 || index >= len(t.tabs) || index == t.active {
 		return
 	}
@@ -114,8 +123,9 @@ func (t *Tabs) setActiveIndex(index int) {
 	t.active = index
 	t.syncVisibility()
 	// A widget in the tab we just hid cannot keep focus (the desktop stops routing
-	// keys to an invisible widget), so pull focus into the newly shown tab.
-	if t.desktop != nil && t.focusInPanel(prev) {
+	// keys to an invisible widget), so pull focus into the newly shown tab whenever
+	// the user drove the switch or focus would otherwise be left on a hidden tab.
+	if t.desktop != nil && (enterFocus || t.focusInPanel(prev)) {
 		t.focusFirstInActive()
 	}
 	if t.OnTabChange != nil {
@@ -131,7 +141,7 @@ func (t *Tabs) switchBy(delta int) bool {
 	if n == 0 {
 		return false
 	}
-	t.setActiveIndex(((t.active+delta)%n + n) % n)
+	t.setActiveIndex(((t.active+delta)%n+n)%n, true)
 	return true
 }
 
@@ -250,7 +260,7 @@ func (t *Tabs) HandleClick(event tui.ClickEvent) bool {
 	}
 	for _, span := range t.labelSpans() {
 		if event.X >= span.x0 && event.X < span.x1 {
-			t.setActiveIndex(span.index)
+			t.setActiveIndex(span.index, true)
 			return true
 		}
 	}
