@@ -854,6 +854,13 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 		d.RequestRedraw()
 		return
 	}
+	// Ctrl+V reads the system clipboard and routes it through the focused widget's
+	// paste path — the same path bracketed paste uses. Consumed only when there was
+	// a focused widget to receive a non-empty read; a failed or empty clipboard read
+	// is a graceful no-op (pasteClipboard handles its own redraw via handlePaste).
+	if isPasteKey(event) && d.pasteClipboard() {
+		return
+	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
 	// visible; a focused descendant of a just-hidden container must not receive
 	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
@@ -952,6 +959,10 @@ func isCutKey(event tui.TypeEvent) bool {
 	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'x'
 }
 
+func isPasteKey(event tui.TypeEvent) bool {
+	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'v'
+}
+
 // copyFocused copies the focused component's CopyFn text to the clipboard,
 // returning true when something was copied.
 func (d *Desktop) copyFocused() bool {
@@ -998,6 +1009,65 @@ func (d *Desktop) handlePaste(event tui.PasteEvent) {
 		}
 		d.RequestRedraw()
 	}
+}
+
+// pasteClipboard reads the system clipboard and routes a non-empty read through
+// the focused widget's paste path (the same path bracketed paste uses), returning
+// true when a read was delivered to a focused widget. It bails — returning false,
+// a graceful no-op — when a menu is open, nothing is focused, or the clipboard
+// read fails or is empty. Clipboard read is best effort (see App.ReadClipboard):
+// it never panics, and the synchronous read is bounded so it cannot hang the loop.
+// It backs both the Ctrl+V key path and the exported Paste.
+func (d *Desktop) pasteClipboard() bool {
+	if d.menuBar != nil && d.menuBar.IsOpen() {
+		return false
+	}
+	if d.focused == nil {
+		return false
+	}
+	text, err := d.app.ReadClipboard()
+	if err != nil || text == "" {
+		return false
+	}
+	d.handlePaste(tui.PasteEvent{Text: text})
+	return true
+}
+
+// CopyFocused copies the focused widget's selection (or its full copyable content
+// when nothing is selected) to the system clipboard, returning true when there was
+// something to copy. It is the exported entry point behind Ctrl+C and an app's
+// Edit→Copy menu item, delegating to the same focused-widget path as the key
+// binding. It is a graceful no-op (returns false) when nothing is focused or the
+// focused widget has nothing to copy. Copy changes nothing visible, so — unlike
+// CutFocused — it requests no redraw.
+func (d *Desktop) CopyFocused() bool {
+	return d.copyFocused()
+}
+
+// CutFocused cuts the focused widget's selection to the system clipboard (the
+// widget deletes it and the desktop copies the removed text), returning true when
+// something was cut. It is the exported entry point behind Ctrl+X and an app's
+// Edit→Cut menu item, delegating to the same focused-widget path as the key
+// binding. On success it requests a redraw, since the cut mutated the widget, so a
+// menu-invoked cut paints without the caller arranging it; it is a graceful no-op
+// (returns false) when there was nothing to cut.
+func (d *Desktop) CutFocused() bool {
+	if d.cutFocused() {
+		d.RequestRedraw()
+		return true
+	}
+	return false
+}
+
+// Paste reads the system clipboard and routes it through the focused widget's
+// paste path — the same path a bracketed (terminal) paste uses. It is the exported
+// entry point behind Ctrl+V and an app's Edit→Paste menu item, returning true when
+// a non-empty clipboard read was delivered to a focused widget. Clipboard read is
+// best effort (see App.ReadClipboard): when no native reader backend is available,
+// or the read fails or is empty, Paste is a graceful no-op — it never panics and
+// does not block indefinitely.
+func (d *Desktop) Paste() bool {
+	return d.pasteClipboard()
 }
 
 // enterSuppressed reports whether Enter should currently be swallowed under the modal

@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 )
 
 // ClipboardBackend selects how CopyToClipboard delivers text to the system
@@ -111,6 +114,72 @@ func nativeClipboardCopy(text string) {
 		_ = stdin.Close()
 		_ = cmd.Wait()
 	}()
+}
+
+// errNoClipboardReader is returned by ReadClipboard when no native clipboard-read
+// command is available on the host. Callers treat it as "nothing to paste" and
+// no-op gracefully rather than surfacing an error to the user.
+var errNoClipboardReader = errors.New("turbotui: no clipboard reader available")
+
+// clipboardReadCmd is one native clipboard-read backend: the command name looked
+// up on PATH plus the arguments that make it print the clipboard to stdout.
+type clipboardReadCmd struct {
+	name string
+	args []string
+}
+
+// clipboardReaders lists the native clipboard-read backends ReadClipboard tries,
+// in priority order; the first one present on PATH whose invocation succeeds
+// wins. It is a variable (not a const) so tests can inject fakes. OSC 52 has a
+// read-query form (ESC ] 52 ; c ; ?) but it is unreliable and unsupported across
+// many terminals, so it is intentionally omitted in favour of these commands.
+var clipboardReaders = []clipboardReadCmd{
+	{name: "pbpaste"},  // macOS
+	{name: "wl-paste"}, // Wayland
+	{name: "xclip", args: []string{"-selection", "clipboard", "-o"}}, // X11
+	{name: "xsel", args: []string{"-b", "-o"}},                       // X11 (xsel)
+}
+
+// clipboardLookPath resolves a clipboard-read command on PATH. It is indirected
+// through a variable so tests can control which backends appear "available"
+// without depending on the host's installed tools.
+var clipboardLookPath = exec.LookPath
+
+// clipboardReadRun runs a resolved clipboard-read command and returns its stdout.
+// It is indirected through a variable so tests can inject a fake runner. The
+// default bounds the call with a short timeout so a wedged clipboard tool cannot
+// hang the event loop that drives a synchronous paste.
+var clipboardReadRun = func(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+// ReadClipboard returns the current system clipboard text on a best-effort basis.
+// It tries the native clipboard-read commands in clipboardReaders order (pbpaste,
+// wl-paste, xclip, xsel), returning the stdout of the first that is present on
+// PATH and exits cleanly. The output is returned verbatim (no trimming) so the
+// read is faithful to what the backend reported.
+//
+// Reading the clipboard from a terminal is not universally possible — OSC 52 is a
+// write-oriented protocol and its read-query is unreliable — so ReadClipboard is
+// the paste counterpart to CopyToClipboard's native fallback, not a guaranteed
+// channel. When no reader backend is available it returns errNoClipboardReader
+// (and never panics or blocks indefinitely), letting the Ctrl+V / Paste path
+// no-op gracefully.
+func (a *App) ReadClipboard() (string, error) {
+	for _, r := range clipboardReaders {
+		path, err := clipboardLookPath(r.name)
+		if err != nil {
+			continue
+		}
+		out, err := clipboardReadRun(path, r.args...)
+		if err != nil {
+			continue
+		}
+		return string(out), nil
+	}
+	return "", errNoClipboardReader
 }
 
 func clipboardCommand() (string, []string) {
