@@ -80,11 +80,15 @@ func (s *Select) SetSelected(index int) {
 // preserved when its value still exists among the new options; otherwise it
 // clamps to 0. Any open popup is closed.
 func (s *Select) SetOptions(opts []string) {
+	// Capture the current value only when a real option is selected, so an
+	// empty-string option is preserved by value while a "nothing selected"
+	// state correctly clamps to 0.
+	hadSelection := s.Selected >= 0 && s.Selected < len(s.Options)
 	prev := s.Value()
 	s.close()
 	s.Options = opts
 	s.Selected = 0
-	if prev != "" {
+	if hadSelection {
 		for i, opt := range opts {
 			if opt == prev {
 				s.Selected = i
