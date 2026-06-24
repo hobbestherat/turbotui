@@ -867,6 +867,14 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
 	// never leak to an off-screen widget.
 	if d.focused != nil && d.focused.visibleInTree() {
+		// Capture phase: an ancestor container (e.g. Tabs) may claim a key BEFORE the
+		// focused leaf sees it, so a shortcut like Alt+Left/Right tab switching works
+		// even when the focused child would otherwise consume the key. Only ancestors
+		// that set OnCaptureTypeFn participate, so this is inert for every other widget.
+		if d.captureType(event) {
+			d.RequestRedraw()
+			return
+		}
 		// Modal Enter-grace (gogent#347): for a short window after a modal appears,
 		// swallow Enter for a focused button so a keystroke the user had already begun
 		// (e.g. submitting a message) cannot activate the freshly-focused dialog button.
@@ -934,6 +942,21 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 	if isQuitKey(event) {
 		d.Quit()
 	}
+}
+
+// captureType offers event to the focused widget's ancestors, innermost first,
+// through their OnCaptureTypeFn hook BEFORE the focused widget itself receives it.
+// A container (e.g. Tabs) uses it to own a shortcut its focused children might
+// otherwise consume. It returns true when an ancestor consumed the event. Ancestors
+// that set no capture hook (every widget that has not opted in) are skipped, so it
+// is inert unless a widget explicitly participates.
+func (d *Desktop) captureType(event tui.TypeEvent) bool {
+	for node := d.focused.parent; node != nil; node = node.parent {
+		if node.Enabled && node.OnCaptureTypeFn != nil && node.OnCaptureTypeFn(node, event) {
+			return true
+		}
+	}
+	return false
 }
 
 // isQuitKey reports the default quit chord: Ctrl+C (with or without Shift, since

@@ -12,17 +12,23 @@ type Tab struct {
 // Tabs is a tabbed container: a horizontal strip of labels above a content region
 // that shows exactly one child Widget — the active tab's content — at a time.
 //
-// Keyboard (handled while focus is inside the active tab, so the keys bubble up to
-// the Tabs node): Alt+Left/Alt+Right or Ctrl+Tab/Ctrl+Shift+Tab switch tabs; plain
-// Tab/Shift+Tab move focus between the focusables WITHIN the active tab and never
-// escape it. Mouse: click a label to activate that tab. OnTabChange fires on every
-// real change (keyboard, mouse, or SetActive).
+// Keyboard, while focus is anywhere inside the active tab: Alt+Left/Alt+Right or
+// Ctrl+Tab/Ctrl+Shift+Tab switch tabs; plain Tab/Shift+Tab move focus between the
+// focusables WITHIN the active tab and never escape it. The switch chords are
+// claimed in the desktop's capture phase (before the focused child sees them), so
+// switching works even when the active tab holds a child that itself consumes
+// arrow or Tab keys. Mouse: click a label to activate that tab. OnTabChange fires
+// on every real change (keyboard, mouse, or SetActive).
 //
-// It is a normal Widget following the VisualComponent/Bind(Painter|Typer|Clicker)
-// pattern: the strip is painted by the widget itself and each tab's Content is a
-// child component whose visibility tracks the active tab. Construct one with
-// NewTabs, then AddTab for each page. A *Desktop is required (like Select) so the
-// widget can drive focus when tabs switch; pass the desktop the Tabs lives on.
+// It is a normal Widget following the VisualComponent /
+// Bind(Painter|Typer|CaptureTyper|Clicker) pattern: the strip is painted by the
+// widget itself and each tab's Content is a child component whose visibility tracks
+// the active tab. Construct one with NewTabs, then AddTab for each page.
+//
+// A non-nil *Desktop is required for the full keyboard contract (like Select): the
+// widget reads and drives focus through it to trap Tab within the active tab and to
+// hand focus to the newly shown tab on a switch. Passing nil yields a Tabs that
+// still renders and switches but performs no focus management.
 type Tabs struct {
 	Component *VisualComponent
 	// OnTabChange, when set, is called with the new index after the active tab
@@ -189,10 +195,12 @@ func (t *Tabs) labelSpans() []labelSpan {
 	return spans
 }
 
-// HandleType implements the tab-switch and focus-within-tab keyboard contract. It
-// runs as an ancestor of the focused content widget, so it only sees keys that the
-// content did not consume.
-func (t *Tabs) HandleType(event tui.TypeEvent) bool {
+// CaptureType claims the tab-switch chords (Alt+Left/Alt+Right, Ctrl+Tab,
+// Ctrl+Shift+Tab) during the capture phase — BEFORE the focused content widget sees
+// them — so switching always works, even when the active tab holds a child that
+// would otherwise consume arrow or Tab keys (a text input, tree, picker, …). This
+// is why the contract does not depend on individual child widgets declining keys.
+func (t *Tabs) CaptureType(event tui.TypeEvent) bool {
 	switch {
 	case event.Key == tui.KeyLeft && event.Alt:
 		return t.switchBy(-1)
@@ -204,6 +212,16 @@ func (t *Tabs) HandleType(event tui.TypeEvent) bool {
 		return t.switchBy(-1)
 	case event.Key == tui.KeyBackTab && event.Ctrl:
 		return t.switchBy(-1)
+	}
+	return false
+}
+
+// HandleType implements plain Tab / Shift+Tab focus traversal WITHIN the active
+// tab. It runs as an ancestor of the focused content widget, AFTER that widget
+// declines the key (a field that wants Tab keeps it), and consumes Tab so focus
+// never escapes the active tab into the strip or a sibling tab.
+func (t *Tabs) HandleType(event tui.TypeEvent) bool {
+	switch {
 	case event.Key == tui.KeyTab && !event.Ctrl && !event.Alt:
 		return t.focusWithin(1)
 	case event.Key == tui.KeyBackTab && !event.Ctrl && !event.Alt:

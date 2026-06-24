@@ -106,11 +106,6 @@ func (t *TextBox) handleType(_ *VisualComponent, event tui.TypeEvent) bool {
 	if event.Ctrl && t.handleCtrlShortcut(event) {
 		return true
 	}
-	// Alt+Left/Right are container navigation (e.g. switching tv.Tabs), not text
-	// editing, so decline them and let the chord bubble to an ancestor handler.
-	if event.Alt && (event.Key == tui.KeyLeft || event.Key == tui.KeyRight) {
-		return false
-	}
 	switch event.Key {
 	case tui.KeyEnter:
 		if t.OnSubmit == nil {

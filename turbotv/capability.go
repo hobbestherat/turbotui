@@ -26,6 +26,14 @@ type (
 		HandleType(event tui.TypeEvent) bool
 	}
 
+	// CaptureTyper handles a key event during the capture phase — before the focused
+	// descendant receives it — returning true when it consumed the key. A container
+	// widget implements it to own a shortcut its focused children might otherwise
+	// swallow (e.g. Tabs switching on Alt+Left/Right).
+	CaptureTyper interface {
+		CaptureType(event tui.TypeEvent) bool
+	}
+
 	// Paster handles a bracketed-paste block, returning true when it consumed it.
 	Paster interface {
 		HandlePaste(text string) bool
@@ -73,16 +81,17 @@ type (
 
 // Compile-time assertions that the convenience struct implements every capability.
 var (
-	_ Painter   = (*VisualComponent)(nil)
-	_ Typer     = (*VisualComponent)(nil)
-	_ Paster    = (*VisualComponent)(nil)
-	_ Clicker   = (*VisualComponent)(nil)
-	_ Scroller  = (*VisualComponent)(nil)
-	_ Focuser   = (*VisualComponent)(nil)
-	_ HitTester = (*VisualComponent)(nil)
-	_ Cursorer  = (*VisualComponent)(nil)
-	_ Copier    = (*VisualComponent)(nil)
-	_ Cutter    = (*VisualComponent)(nil)
+	_ Painter      = (*VisualComponent)(nil)
+	_ Typer        = (*VisualComponent)(nil)
+	_ CaptureTyper = (*VisualComponent)(nil)
+	_ Paster       = (*VisualComponent)(nil)
+	_ Clicker      = (*VisualComponent)(nil)
+	_ Scroller     = (*VisualComponent)(nil)
+	_ Focuser      = (*VisualComponent)(nil)
+	_ HitTester    = (*VisualComponent)(nil)
+	_ Cursorer     = (*VisualComponent)(nil)
+	_ Copier       = (*VisualComponent)(nil)
+	_ Cutter       = (*VisualComponent)(nil)
 )
 
 // Paint draws the component's own content via its DrawFn (a no-op when unset).
@@ -95,6 +104,12 @@ func (c *VisualComponent) Paint(surface Surface) {
 // HandleType offers a key event to the component's OnTypeFn.
 func (c *VisualComponent) HandleType(event tui.TypeEvent) bool {
 	return c.OnTypeFn != nil && c.OnTypeFn(c, event)
+}
+
+// CaptureType offers a key event to the component's OnCaptureTypeFn during the
+// capture phase (a no-op when unset).
+func (c *VisualComponent) CaptureType(event tui.TypeEvent) bool {
+	return c.OnCaptureTypeFn != nil && c.OnCaptureTypeFn(c, event)
 }
 
 // HandlePaste offers pasted text to the component's OnPasteFn.
@@ -165,6 +180,9 @@ func (c *VisualComponent) Bind(behavior any) {
 	}
 	if t, ok := behavior.(Typer); ok {
 		c.OnTypeFn = func(_ *VisualComponent, event tui.TypeEvent) bool { return t.HandleType(event) }
+	}
+	if capt, ok := behavior.(CaptureTyper); ok {
+		c.OnCaptureTypeFn = func(_ *VisualComponent, event tui.TypeEvent) bool { return capt.CaptureType(event) }
 	}
 	if p, ok := behavior.(Paster); ok {
 		c.OnPasteFn = func(_ *VisualComponent, text string) bool { return p.HandlePaste(text) }
