@@ -63,6 +63,12 @@ type VisualComponent struct {
 	// did not consume it) is focused. Return true to consume it; return false to
 	// let it bubble to the parent.
 	OnTypeFn TypeHandlerFn
+	// OnCaptureTypeFn, when set, is offered a key event during the capture phase —
+	// BEFORE the focused descendant receives it — as the desktop walks up from the
+	// focused widget through its ancestors. Return true to consume the key so the
+	// focused child never sees it; return false to decline. It lets a container
+	// (e.g. Tabs) own a shortcut its focused children would otherwise swallow.
+	OnCaptureTypeFn TypeHandlerFn
 	// OnPasteFn is offered a bracketed-paste block delivered to the focused
 	// component. Return true to consume it, false to let it bubble.
 	OnPasteFn PasteHandlerFn
