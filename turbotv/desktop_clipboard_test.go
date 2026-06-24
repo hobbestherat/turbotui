@@ -192,6 +192,42 @@ func TestCtrlVPastesClipboardBeforeFocusedTypeAndFallthrough(t *testing.T) {
 	}
 }
 
+func TestCtrlVReadFailureIsConsumedAsNoop(t *testing.T) {
+	desktop, _ := newClipboardDesktop(t)
+	t.Setenv("PATH", t.TempDir())
+	widget := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 1})
+	widget.Focusable = true
+	typed := 0
+	fallthroughBinding := 0
+	unhandled := 0
+	widget.OnTypeFn = func(_ *VisualComponent, _ tui.TypeEvent) bool {
+		typed++
+		return true
+	}
+	desktop.ScopedBindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'v', Ctrl: true}, Scope: ScopeFallthrough},
+		func() bool {
+			fallthroughBinding++
+			return true
+		},
+	)
+	desktop.SetUnhandledKeyFn(func(tui.TypeEvent) { unhandled++ })
+	desktop.AddLayer(NewFullscreenLayer("base", widget))
+	desktop.SetFocus(widget)
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRune, Rune: 'v', Ctrl: true})
+
+	if typed != 0 {
+		t.Fatalf("Ctrl+V read failure reached focused OnTypeFn %d times, want 0", typed)
+	}
+	if fallthroughBinding != 0 {
+		t.Fatalf("Ctrl+V read failure reached fallthrough binding %d times, want 0", fallthroughBinding)
+	}
+	if unhandled != 0 {
+		t.Fatalf("Ctrl+V read failure reached unhandled-key handler %d times, want 0", unhandled)
+	}
+}
+
 func TestCtrlCAndCtrlXStillUseExistingFocusedClipboardPaths(t *testing.T) {
 	desktop, output := newClipboardDesktop(t)
 	widget := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 1})
