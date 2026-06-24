@@ -2,6 +2,7 @@ package tv
 
 import (
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -287,5 +288,118 @@ func TestSelectViewOffsetClamps(t *testing.T) {
 	s.offset = 999
 	if got := s.viewOffset(); got != 6 {
 		t.Fatalf("viewOffset should clamp to max 6, got %d", got)
+	}
+}
+
+func TestSelectSetOptionsReplacesOptionsAndPreservesSelectionByValue(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "bravo", "charlie"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 1)
+
+	next := []string{"charlie", "alpha", "bravo", "delta"}
+	s.SetOptions(next)
+
+	if !reflect.DeepEqual(s.Options, next) {
+		t.Fatalf("Options = %#v, want %#v", s.Options, next)
+	}
+	if s.Selected != 2 {
+		t.Fatalf("Selected = %d, want 2 for preserved value %q", s.Selected, "bravo")
+	}
+	if got := s.Value(); got != "bravo" {
+		t.Fatalf("Value() = %q, want preserved value %q", got, "bravo")
+	}
+}
+
+func TestSelectSetOptionsClampsToZeroWhenSelectedValueIsGone(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "bravo", "charlie"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 1)
+
+	s.SetOptions([]string{"delta", "echo"})
+
+	if s.Selected != 0 {
+		t.Fatalf("Selected = %d, want 0 when old value is absent", s.Selected)
+	}
+	if got := s.Value(); got != "delta" {
+		t.Fatalf("Value() = %q, want first replacement option %q", got, "delta")
+	}
+}
+
+func TestSelectSetOptionsClosesOpenPopupAndResetsScrollState(t *testing.T) {
+	opts := make([]string, 20)
+	for i := range opts {
+		opts[i] = "option"
+	}
+	opts[12] = "keep"
+	_, s := setupSelect(40, 7, opts, Rect{X: 0, Y: 0, W: 20, H: 1}, 12)
+	s.open()
+	if !s.IsOpen() {
+		t.Fatalf("precondition: popup should be open")
+	}
+	if s.offset == 0 {
+		t.Fatalf("precondition: opening selected option 12 should scroll it into view")
+	}
+	s.popupScroll(nil, tui.ScrollEvent{Delta: -1})
+	s.highlight = 15
+	s.SetOptions([]string{"first", "keep", "last"})
+
+	if s.IsOpen() {
+		t.Fatalf("SetOptions should close an open popup")
+	}
+	if s.Selected != 1 {
+		t.Fatalf("Selected = %d, want 1 for preserved value after replacement", s.Selected)
+	}
+	if s.offset != 0 {
+		t.Fatalf("offset = %d, want reset to 0", s.offset)
+	}
+	if s.highlight != s.Selected {
+		t.Fatalf("highlight = %d, want selected index %d after reset", s.highlight, s.Selected)
+	}
+}
+
+func TestSelectSetOptionsHandlesEmptyOptions(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "bravo"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 1)
+	s.open()
+
+	s.SetOptions(nil)
+
+	if s.IsOpen() {
+		t.Fatalf("SetOptions(nil) should close the popup")
+	}
+	if len(s.Options) != 0 {
+		t.Fatalf("len(Options) = %d, want 0", len(s.Options))
+	}
+	if s.Selected != 0 {
+		t.Fatalf("Selected = %d, want 0 for an empty option list", s.Selected)
+	}
+	if got := s.Value(); got != "" {
+		t.Fatalf("Value() = %q, want empty string for an empty option list", got)
+	}
+	s.open()
+	if s.IsOpen() {
+		t.Fatalf("open on an empty option list should leave popup closed")
+	}
+}
+
+func TestSelectSetOptionsPreservesEmptyStringSelectionByValue(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "", "charlie"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 1)
+
+	s.SetOptions([]string{"first", "second", ""})
+
+	if s.Selected != 2 {
+		t.Fatalf("Selected = %d, want 2 to preserve the selected empty-string option by value", s.Selected)
+	}
+	if got := s.Value(); got != "" {
+		t.Fatalf("Value() = %q, want preserved empty string", got)
+	}
+}
+
+func TestSelectSetOptionsInvalidCurrentSelectionDoesNotPreserveEmptyValue(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "bravo"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 0)
+	s.Selected = 99
+
+	s.SetOptions([]string{"first", "", "last"})
+
+	if s.Selected != 0 {
+		t.Fatalf("Selected = %d, want 0 when there was no valid current selection", s.Selected)
+	}
+	if got := s.Value(); got != "first" {
+		t.Fatalf("Value() = %q, want first option after clamping invalid selection", got)
 	}
 }
