@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -210,5 +211,130 @@ func TestCopyToClipboardPayloadAtCapIsEmitted(t *testing.T) {
 	app.CopyToClipboard(text)
 	if !strings.Contains(buf.String(), "\x1b]52") {
 		t.Fatalf("payload at cap should be emitted")
+	}
+}
+
+func stubClipboardReaderSeams(t *testing.T, available map[string]string, outputs map[string]struct {
+	text string
+	err  error
+}) *[]string {
+	t.Helper()
+	origReaders := clipboardReaders
+	origLookPath := clipboardLookPath
+	origReadRun := clipboardReadRun
+	calls := []string{}
+
+	clipboardLookPath = func(name string) (string, error) {
+		path, ok := available[name]
+		if !ok {
+			return "", errors.New("not found")
+		}
+		return path, nil
+	}
+	clipboardReadRun = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+		out := outputs[name]
+		if out.err != nil {
+			return nil, out.err
+		}
+		return []byte(out.text), nil
+	}
+
+	t.Cleanup(func() {
+		clipboardReaders = origReaders
+		clipboardLookPath = origLookPath
+		clipboardReadRun = origReadRun
+	})
+	return &calls
+}
+
+func TestReadClipboardUsesFirstAvailableSuccessfulBackend(t *testing.T) {
+	calls := stubClipboardReaderSeams(t,
+		map[string]string{
+			"wl-paste": "/fake/wl-paste",
+			"xclip":    "/fake/xclip",
+			"xsel":     "/fake/xsel",
+		},
+		map[string]struct {
+			text string
+			err  error
+		}{
+			"/fake/wl-paste": {text: "wayland\n"},
+			"/fake/xclip":    {text: "xclip"},
+			"/fake/xsel":     {text: "xsel"},
+		},
+	)
+	clipboardReaders = []clipboardReadCmd{
+		{name: "pbpaste"},
+		{name: "wl-paste"},
+		{name: "xclip", args: []string{"-selection", "clipboard", "-o"}},
+		{name: "xsel", args: []string{"-b", "-o"}},
+	}
+
+	app := NewWithSize(20, 5, &bytes.Buffer{})
+	got, err := app.ReadClipboard()
+	if err != nil {
+		t.Fatalf("ReadClipboard returned error: %v", err)
+	}
+	if got != "wayland\n" {
+		t.Fatalf("ReadClipboard = %q, want first successful backend output", got)
+	}
+	if len(*calls) != 1 || (*calls)[0] != "/fake/wl-paste" {
+		t.Fatalf("expected only wl-paste to run, got %v", *calls)
+	}
+}
+
+func TestReadClipboardSkipsUnavailableAndFailingBackends(t *testing.T) {
+	calls := stubClipboardReaderSeams(t,
+		map[string]string{
+			"pbpaste": "/fake/pbpaste",
+			"xclip":   "/fake/xclip",
+		},
+		map[string]struct {
+			text string
+			err  error
+		}{
+			"/fake/pbpaste": {err: errors.New("backend failed")},
+			"/fake/xclip":   {text: "x11"},
+		},
+	)
+	clipboardReaders = []clipboardReadCmd{
+		{name: "pbpaste"},
+		{name: "wl-paste"},
+		{name: "xclip", args: []string{"-selection", "clipboard", "-o"}},
+		{name: "xsel", args: []string{"-b", "-o"}},
+	}
+
+	app := NewWithSize(20, 5, &bytes.Buffer{})
+	got, err := app.ReadClipboard()
+	if err != nil {
+		t.Fatalf("ReadClipboard returned error: %v", err)
+	}
+	if got != "x11" {
+		t.Fatalf("ReadClipboard = %q, want later successful backend output", got)
+	}
+	wantCalls := []string{"/fake/pbpaste", "/fake/xclip -selection clipboard -o"}
+	if strings.Join(*calls, "|") != strings.Join(wantCalls, "|") {
+		t.Fatalf("backend calls = %v, want %v", *calls, wantCalls)
+	}
+}
+
+func TestReadClipboardReturnsErrorWhenNoBackendAvailable(t *testing.T) {
+	calls := stubClipboardReaderSeams(t, nil, nil)
+	clipboardReaders = []clipboardReadCmd{
+		{name: "pbpaste"},
+		{name: "wl-paste"},
+	}
+
+	app := NewWithSize(20, 5, &bytes.Buffer{})
+	got, err := app.ReadClipboard()
+	if err == nil {
+		t.Fatalf("ReadClipboard returned nil error with no readers")
+	}
+	if got != "" {
+		t.Fatalf("ReadClipboard returned %q with no readers, want empty string", got)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("unavailable backends must not run, got %v", *calls)
 	}
 }
