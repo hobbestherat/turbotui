@@ -14,11 +14,11 @@ type Tab struct {
 //
 // Keyboard, while focus is anywhere inside the active tab: Alt+Left/Alt+Right or
 // Ctrl+Tab/Ctrl+Shift+Tab switch tabs; plain Tab/Shift+Tab move focus between the
-// focusables WITHIN the active tab and never escape it. The switch chords are
-// claimed in the desktop's capture phase (before the focused child sees them), so
-// switching works even when the active tab holds a child that itself consumes
-// arrow or Tab keys. Mouse: click a label to activate that tab. OnTabChange fires
-// on every real change (keyboard, mouse, or SetActive).
+// focusables WITHIN the active tab and never escape it. Both the switch chords and
+// Tab are claimed in the desktop's capture phase (before the focused child sees
+// them), so the whole contract holds even when the active tab hosts a child that
+// itself consumes arrow or Tab keys. Mouse: click a label to activate that tab.
+// OnTabChange fires on every real change (keyboard, mouse, or SetActive).
 //
 // It is a normal Widget following the VisualComponent /
 // Bind(Painter|Typer|CaptureTyper|Clicker) pattern: the strip is painted by the
@@ -195,12 +195,31 @@ func (t *Tabs) labelSpans() []labelSpan {
 	return spans
 }
 
-// CaptureType claims the tab-switch chords (Alt+Left/Alt+Right, Ctrl+Tab,
-// Ctrl+Shift+Tab) during the capture phase — BEFORE the focused content widget sees
-// them — so switching always works, even when the active tab holds a child that
-// would otherwise consume arrow or Tab keys (a text input, tree, picker, …). This
-// is why the contract does not depend on individual child widgets declining keys.
+// CaptureType claims the full Tabs keyboard contract during the capture phase —
+// BEFORE the focused content widget sees the key — so both tab switching
+// (Alt+Left/Alt+Right, Ctrl+Tab, Ctrl+Shift+Tab) and intra-tab focus traversal
+// (plain Tab / Shift+Tab) work even when the active tab holds a child that itself
+// consumes arrow or Tab keys (a text input, tree, picker, …). Owning Tab here, like
+// the switch chords, matches the toolkit's convention that Tab is container-level
+// focus navigation rather than widget input, so the contract never depends on
+// individual children declining keys.
 func (t *Tabs) CaptureType(event tui.TypeEvent) bool {
+	return t.handleNav(event)
+}
+
+// HandleType is the post-child (bubbling) entry point for the same navigation; it
+// exists so the contract still degrades gracefully if Tabs is ever driven without
+// the capture phase, and as the directly callable handler. In the normal desktop
+// dispatch CaptureType has already claimed these keys, so this is only reached for
+// keys it declined.
+func (t *Tabs) HandleType(event tui.TypeEvent) bool {
+	return t.handleNav(event)
+}
+
+// handleNav resolves a key against the Tabs navigation contract: the switch chords
+// move between tabs, plain Tab / Shift+Tab cycle focus within the active tab. It
+// reports whether the key was consumed.
+func (t *Tabs) handleNav(event tui.TypeEvent) bool {
 	switch {
 	case event.Key == tui.KeyLeft && event.Alt:
 		return t.switchBy(-1)
@@ -212,16 +231,6 @@ func (t *Tabs) CaptureType(event tui.TypeEvent) bool {
 		return t.switchBy(-1)
 	case event.Key == tui.KeyBackTab && event.Ctrl:
 		return t.switchBy(-1)
-	}
-	return false
-}
-
-// HandleType implements plain Tab / Shift+Tab focus traversal WITHIN the active
-// tab. It runs as an ancestor of the focused content widget, AFTER that widget
-// declines the key (a field that wants Tab keeps it), and consumes Tab so focus
-// never escapes the active tab into the strip or a sibling tab.
-func (t *Tabs) HandleType(event tui.TypeEvent) bool {
-	switch {
 	case event.Key == tui.KeyTab && !event.Ctrl && !event.Alt:
 		return t.focusWithin(1)
 	case event.Key == tui.KeyBackTab && !event.Ctrl && !event.Alt:
