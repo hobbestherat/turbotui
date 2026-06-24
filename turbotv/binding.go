@@ -214,7 +214,7 @@ func (s Scope) String() string {
 // KeyBinding ties a Chord to an opaque ActionID, qualified by the Scope that
 // decides where in the dispatch chain it is consulted. It is the first-class
 // representation of "this combo triggers this action" that the toolkit stores and
-// matches; menu accelerators are registered as KeyBindings (see MenuBar.Registry).
+// matches; global accelerators are registered as KeyBindings (see Desktop.Bindings).
 //
 // Scope defaults to ScopeGlobal, so a zero-valued binding is a Global menu-style
 // accelerator — every Phase-1 binding keeps its behavior unchanged.
@@ -234,14 +234,13 @@ type KeyBinding struct {
 
 // BindingRegistry stores key bindings and resolves an incoming event chord to the
 // binding (and ActionID) it triggers. It is the toolkit's first-class home for
-// "what is a keybinding": the menu accelerator path consults it instead of walking
-// per-item shortcut fields, and later binding scopes can register into the same
-// structure.
+// "what is a keybinding": the Desktop owns a single registry holding all three
+// scopes (Global, Focus, Fallthrough), and each dispatch position filters it by
+// scope via applies — so global accelerators, focus-scoped keys, and fallthrough
+// bindings all live in one structure (gogent #401).
 //
 // Bindings are matched in registration order, so the first registered binding
-// whose chord matches an event wins. The menu builds its registry in menu-tree
-// pre-order, which preserves the first-match-wins semantics of the old recursive
-// walk exactly.
+// whose chord matches an event wins.
 type BindingRegistry struct {
 	entries []bindingEntry
 }
@@ -285,12 +284,11 @@ func (r *BindingRegistry) Len() int {
 // Dispatch to actually fire the action, and MatchFocus/MatchFallthrough for the
 // scoped lookups.
 //
-// Match is deliberately Global-only, not scope-agnostic: it shares the registry type
-// with the scoped lookups but only ever surfaces Global bindings. This means a Focus
-// or Fallthrough binding mistakenly registered into the menu (Global) registry is
-// inert here rather than silently firing as a global accelerator — which would
-// bypass focus-scoping and modal blocking. Register scoped bindings into
-// Desktop.ScopedBindings and Global accelerators into the menu (Desktop.Bindings).
+// Match is deliberately Global-only, not scope-agnostic: the registry holds all
+// three scopes in one entries slice, but Match only ever surfaces Global bindings.
+// This means a Focus or Fallthrough binding in the same registry is inert here
+// rather than silently firing as a global accelerator — which would bypass
+// focus-scoping and modal blocking. Use MatchFocus/MatchFallthrough for those.
 func (r *BindingRegistry) Match(event tui.TypeEvent) (KeyBinding, bool) {
 	for _, entry := range r.entries {
 		if entry.applies(ScopeGlobal, nil) && entry.binding.Chord.Matches(event) {
@@ -306,11 +304,11 @@ func (r *BindingRegistry) Match(event tui.TypeEvent) (KeyBinding, bool) {
 // next match is tried, so a disabled menu accelerator does not swallow the chord. A
 // matched binding with a nil handler consumes the event without doing anything.
 //
-// Like Match, Dispatch is Global-only. The menu accelerator path (HandleAccelerator)
-// uses it, and the menu registry holds only Global bindings, so this is exactly the
-// menu-accelerator dispatch. A Focus/Fallthrough binding misplaced into the menu
-// registry is inert here (never fires as a global accelerator); the scoped points
-// use DispatchFocus/DispatchFallthrough.
+// Like Match, Dispatch is Global-only. The desktop's menu-accelerator stage calls it
+// (Desktop.handleType) on the single Desktop registry, so this is exactly the
+// global-accelerator dispatch. Focus/Fallthrough bindings in the same registry are
+// inert here (never fire as a global accelerator); the scoped dispatch positions use
+// DispatchFocus/DispatchFallthrough.
 func (r *BindingRegistry) Dispatch(event tui.TypeEvent) bool {
 	for _, entry := range r.entries {
 		if !entry.applies(ScopeGlobal, nil) || !entry.binding.Chord.Matches(event) {

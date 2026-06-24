@@ -15,18 +15,24 @@ type MenuShortcut struct {
 }
 
 type MenuItem struct {
-	Label    string
+	Label string
+	// Shortcut is the accelerator HINT drawn at the right of the item; it is
+	// display-only. The menu bar no longer owns a BindingRegistry and does not
+	// register accelerators from its tree — global accelerators live on the
+	// Desktop's single registry (see Desktop.Bindings) and the menu reads the
+	// rendered Display string from there. A nil Shortcut draws no hint.
 	Shortcut *MenuShortcut
 	Children []*MenuItem
 	OnSelect func()
 	Enabled  bool
 
-	// ActionID is an opaque identifier for the action this item triggers. It is
-	// optional and empty by default; when set it is carried into the BindingRegistry
-	// alongside the item's Shortcut so the accelerator that fires this item can be
-	// resolved by ActionID — the opaque contract turbotui shares with the
-	// application. Phase 1 still fires the item through OnSelect, so leaving this
-	// empty changes nothing.
+	// ActionID is an opaque identifier for the action this item triggers — the
+	// opaque contract turbotui shares with the application. It is optional and empty
+	// by default. The menu bar no longer registers bindings from its tree, so this
+	// is purely a label an application can use to associate a menu item with the
+	// matching binding it registers on the Desktop registry (e.g. to sync the
+	// Shortcut display when the binding is rebound). The item always fires through
+	// OnSelect, so leaving this empty changes nothing.
 	ActionID ActionID
 
 	// Separator draws a non-selectable horizontal rule instead of a label and is
@@ -98,21 +104,22 @@ func (m *MenuItem) WithShortcutMod(display string, key tui.KeyCode, r rune, ctrl
 	return m
 }
 
-// WithActionID tags the item with an opaque ActionID carried into the
-// BindingRegistry alongside its shortcut. It is additive: items without an
-// ActionID still register and fire exactly as before.
+// WithActionID tags the item with an opaque ActionID labelling the action it
+// triggers. It is additive and display-oriented: the menu bar no longer registers
+// bindings from its tree, so this only labels the item (an application can use it to
+// keep the Shortcut hint in sync with the binding it registered on the Desktop
+// registry). Items without an ActionID fire through OnSelect exactly as before.
 func (m *MenuItem) WithActionID(id ActionID) *MenuItem {
 	m.ActionID = id
 	return m
 }
 
-// Chord returns the key combination this shortcut matches, decoupled from its
-// Display string. It bridges the legacy MenuShortcut representation to the
-// first-class Chord used by the BindingRegistry. A nil shortcut yields the zero
-// Chord; note the zero Chord is not inert — with no named key and no rune to
-// compare it matches any modifier-free event (this mirrors the pre-refactor
-// matchShortcut, which the menu path never reaches because it guards Shortcut !=
-// nil before registering).
+// Chord returns the key combination this shortcut's fields describe, decoupled from
+// its Display string. It bridges the MenuShortcut representation to the first-class
+// Chord used by the BindingRegistry, so an application can derive the Chord a menu
+// item's hint represents. A nil shortcut yields the zero Chord; note the zero Chord
+// is not inert — with no named key and no rune to compare it matches any
+// modifier-free event (this mirrors matchShortcut, which guards Shortcut != nil).
 func (s *MenuShortcut) Chord() Chord {
 	if s == nil {
 		return Chord{}
@@ -133,11 +140,6 @@ type MenuBar struct {
 	Shadow    bool
 	ShadowCol tui.Color
 	ShadowSty ShadowStyle
-
-	// registry is the persistent BindingRegistry the accelerator path consults. It
-	// is built from the menu tree by NewMenuBar (or lazily by Registry) and re-synced
-	// by RebuildBindings; it is not rebuilt per keystroke.
-	registry *BindingRegistry
 
 	openPath     []int
 	hoverPath    []int
@@ -177,7 +179,6 @@ func NewMenuBar(bounds Rect, menus ...*MenuItem) *MenuBar {
 	bar.Component.OnMnemonicFn = func(_ *VisualComponent, lower rune) bool {
 		return bar.OpenTopByMnemonic(lower)
 	}
-	bar.RebuildBindings()
 	return bar
 }
 
@@ -571,82 +572,6 @@ func (m *MenuBar) HitTest(x int, y int) bool {
 func (m *MenuBar) CloseMenus() {
 	m.openPath = []int{}
 	m.hoverPath = []int{}
-}
-
-// HandleAccelerator fires Ctrl-style accelerators (e.g. Ctrl+S) declared via
-// WithShortcut. It works regardless of whether a menu is open. The match is
-// resolved through a BindingRegistry built from the menu tree (see Registry)
-// instead of by walking per-item Shortcut fields, so the menu accelerator path and
-// the toolkit's first-class binding mechanism are one and the same. Menu items
-// keep their Shortcut purely for rendering the right-hand hint.
-func (m *MenuBar) HandleAccelerator(event tui.TypeEvent) bool {
-	if m.Registry().Dispatch(event) {
-		m.openPath = []int{}
-		m.hoverPath = []int{}
-		return true
-	}
-	return false
-}
-
-// Registry returns the menu's persistent BindingRegistry — the single instance the
-// accelerator path consults, owned by the MenuBar. It is built once (by NewMenuBar,
-// or lazily here for a MenuBar assembled without it) and keeps a stable identity
-// across calls. A caller may Register an extra binding on it and it persists across
-// Registry() calls, but only until the next RebuildBindings, which resets the
-// registry to the menu bindings (see RebuildBindings). Use RebuildBindings to
-// re-sync after structurally changing the menu tree.
-func (m *MenuBar) Registry() *BindingRegistry {
-	if m.registry == nil {
-		m.RebuildBindings()
-	}
-	return m.registry
-}
-
-// RebuildBindings re-syncs the menu's BindingRegistry from the current menu tree:
-// every item that carries a Shortcut is registered, in pre-order (an item before
-// its children, children before the next sibling), so a Dispatch fires the same
-// item the old recursive walk would have. Each binding's handler invokes the item's
-// OnSelect only when the item is Enabled, and reports the item as not live when it
-// is disabled — exactly the menu's "disabled accelerator is skipped, not swallowed"
-// rule.
-//
-// NewMenuBar calls it; call it again after structurally mutating Menus (adding or
-// removing items, or changing an item's Shortcut chord). Toggling an item's Enabled
-// state or swapping its OnSelect needs no rebuild — those are read live when an
-// accelerator fires. Rebuilding resets the registry to the menu bindings, so any
-// extra bindings a caller Registered are dropped.
-func (m *MenuBar) RebuildBindings() {
-	if m.registry == nil {
-		m.registry = NewBindingRegistry()
-	} else {
-		m.registry.Clear()
-	}
-	registerMenuBindings(m.registry, m.Menus)
-}
-
-// registerMenuBindings walks items in pre-order, registering each item's shortcut
-// as a KeyBinding whose handler fires the item (respecting Enabled).
-func registerMenuBindings(registry *BindingRegistry, items []*MenuItem) {
-	for _, item := range items {
-		if item.Shortcut != nil {
-			current := item
-			registry.Register(
-				KeyBinding{Chord: current.Shortcut.Chord(), ActionID: current.ActionID},
-				func() bool {
-					if !current.Enabled {
-						return false
-					}
-					if current.OnSelect != nil {
-						current.OnSelect()
-					}
-					return true
-				},
-			)
-		}
-		if len(item.Children) > 0 {
-			registerMenuBindings(registry, item.Children)
-		}
-	}
 }
 
 // HandleKey drives keyboard navigation while a menu is open: arrows, Enter,
