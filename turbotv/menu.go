@@ -79,6 +79,12 @@ func NewCheckMenuItem(label string, checked bool, onToggle func(checked bool)) *
 	}
 }
 
+// WithShortcut sets the item's accelerator HINT (the string drawn at the right of
+// the item). It is display-only: the menu bar does not register bindings from its
+// tree, so this does not make the chord fire — the application registers the
+// matching Global accelerator on the Desktop registry (see Desktop.Bindings). The
+// key/rune/ctrl fields back MenuShortcut.Chord so a caller can derive the chord the
+// hint represents.
 func (m *MenuItem) WithShortcut(display string, key tui.KeyCode, r rune, ctrl bool) *MenuItem {
 	m.Shortcut = &MenuShortcut{
 		Display: display,
@@ -89,9 +95,11 @@ func (m *MenuItem) WithShortcut(display string, key tui.KeyCode, r rune, ctrl bo
 	return m
 }
 
-// WithShortcutMod is the modifier-aware form of WithShortcut: it binds a shortcut
-// carrying any combination of Ctrl/Shift/Alt, enabling chords such as Shift+F1 or
-// Ctrl+Shift+S and bare function-key accelerators (pass key = tui.KeyF1…, r = 0).
+// WithShortcutMod is the modifier-aware form of WithShortcut: it sets a display
+// hint carrying any combination of Ctrl/Shift/Alt, describing chords such as Shift+F1
+// or Ctrl+Shift+S and bare function-key accelerators (pass key = tui.KeyF1…, r = 0).
+// Like WithShortcut it is display-only — it does not register a binding; the
+// application registers the matching accelerator on the Desktop registry.
 func (m *MenuItem) WithShortcutMod(display string, key tui.KeyCode, r rune, ctrl bool, shift bool, alt bool) *MenuItem {
 	m.Shortcut = &MenuShortcut{
 		Display: display,
@@ -791,9 +799,10 @@ func (m *MenuBar) OpenTopByMnemonic(lower rune) bool {
 	return false
 }
 
-// matchShortcut reports whether event triggers shortcut. It defers to Chord.Matches
-// so the menu accelerator path and the BindingRegistry share one comparison and can
-// never drift (the dispatch tests pin this contract).
+// matchShortcut reports whether event would trigger shortcut. It defers to
+// Chord.Matches so a MenuShortcut and the BindingRegistry compare an event the same
+// way and can never drift (the dispatch tests pin this contract). A nil shortcut
+// never matches.
 func matchShortcut(event tui.TypeEvent, shortcut *MenuShortcut) bool {
 	if shortcut == nil {
 		return false

@@ -35,9 +35,7 @@ func main() {
 
 	menu := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: app.Width(), H: 1},
 		tv.NewSubMenu("&File",
-			tv.NewMenuItem("E&xit", func() {
-				stop()
-			}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
+			tv.NewMenuItem("E&xit", stop).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
 		),
 		tv.NewSubMenu("&Help",
 			tv.NewMenuItem("&About", func() {
@@ -46,6 +44,12 @@ func main() {
 		),
 	)
 	desktop.SetMenuBar(menu)
+	// The menu Shortcut is a display-only hint; register the accelerator as a Global
+	// binding on the desktop's single registry so Ctrl+Q actually fires.
+	desktop.Bindings().Register(
+		tv.KeyBinding{Chord: tv.Chord{Rune: 'q', Ctrl: true}, Scope: tv.ScopeGlobal},
+		func() bool { stop(); return true },
+	)
 
 	// One full-screen window. compose() keeps it sized to the terminal, and the
 	// Content LayoutFn below reflows the 80/20 split on every resize.
