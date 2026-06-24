@@ -389,3 +389,17 @@ func TestSelectSetOptionsPreservesEmptyStringSelectionByValue(t *testing.T) {
 		t.Fatalf("Value() = %q, want preserved empty string", got)
 	}
 }
+
+func TestSelectSetOptionsInvalidCurrentSelectionDoesNotPreserveEmptyValue(t *testing.T) {
+	_, s := setupSelect(40, 10, []string{"alpha", "bravo"}, Rect{X: 0, Y: 0, W: 20, H: 1}, 0)
+	s.Selected = 99
+
+	s.SetOptions([]string{"first", "", "last"})
+
+	if s.Selected != 0 {
+		t.Fatalf("Selected = %d, want 0 when there was no valid current selection", s.Selected)
+	}
+	if got := s.Value(); got != "first" {
+		t.Fatalf("Value() = %q, want first option after clamping invalid selection", got)
+	}
+}
