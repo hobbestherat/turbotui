@@ -854,6 +854,17 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 		d.RequestRedraw()
 		return
 	}
+	// Ctrl+V reads the system clipboard and routes it through the focused widget's
+	// paste path — the same path bracketed paste uses. Unlike Ctrl+C/Ctrl+X (which
+	// fall through to a quit handler when there is nothing to copy/cut), Ctrl+V has
+	// no fall-through purpose, so it is always consumed once recognised: a failed or
+	// empty clipboard read is a true graceful no-op that does NOT leak the keystroke
+	// to the focused widget, scoped bindings, or the unhandled-key handler.
+	// pasteClipboard handles its own redraw via handlePaste on a successful paste.
+	if isPasteKey(event) {
+		d.pasteClipboard()
+		return
+	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
 	// visible; a focused descendant of a just-hidden container must not receive
 	// keystrokes. Hidden-focus is cleared on minimize, but guard here too so types
@@ -952,6 +963,10 @@ func isCutKey(event tui.TypeEvent) bool {
 	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'x'
 }
 
+func isPasteKey(event tui.TypeEvent) bool {
+	return event.Key == tui.KeyRune && event.Ctrl && unicodeLower(event.Rune) == 'v'
+}
+
 // copyFocused copies the focused component's CopyFn text to the clipboard,
 // returning true when something was copied.
 func (d *Desktop) copyFocused() bool {
@@ -982,22 +997,97 @@ func (d *Desktop) cutFocused() bool {
 }
 
 // handlePaste routes a bracketed-paste block to the focused widget as literal
-// text. A dropped-down menu swallows it (paste makes no sense in a menu).
+// text. A dropped-down menu swallows it: a terminal-initiated paste can arrive at
+// any moment, and one landing while a menu is open must not leak to the widget
+// behind it (paste makes no sense in a menu). This guard is specific to bracketed
+// paste — the explicit Ctrl+V / Paste path deliberately does not have it (see
+// pasteClipboard), mirroring Copy/Cut.
 func (d *Desktop) handlePaste(event tui.PasteEvent) {
 	if d.menuBar != nil && d.menuBar.IsOpen() {
 		return
 	}
+	d.deliverPaste(event.Text)
+}
+
+// deliverPaste routes paste text to the focused widget — the shared core of
+// bracketed paste (handlePaste) and the explicit Ctrl+V / Paste path
+// (pasteClipboard). It returns true when the focused widget consumed the paste.
+// It does NOT consult menu-open state; callers decide whether a dropped-down menu
+// should suppress the paste. A consumed paste counts toward typing-awareness and
+// requests a redraw, exactly as before.
+func (d *Desktop) deliverPaste(text string) bool {
 	if d.focused == nil {
-		return
+		return false
 	}
-	if d.focused.BubblePaste(event.Text) {
+	if d.focused.BubblePaste(text) {
 		// A consumed paste into a text field is text input, so it counts toward
 		// typing-awareness (gogent#346) just like keystrokes do.
 		if d.focusedIsTextInput() {
 			d.lastInputAt = d.now()
 		}
 		d.RequestRedraw()
+		return true
 	}
+	return false
+}
+
+// pasteClipboard reads the system clipboard and routes a non-empty read to the
+// focused widget, returning true when the widget consumed the paste. It backs both
+// the Ctrl+V key path and the exported Paste. Unlike bracketed paste it does NOT
+// suppress on an open menu — menu actions run while their dropdown is still open
+// (OnSelect fires before the menu closes), so an Edit→Paste callback or a
+// menu-owned Ctrl+V accelerator must still paste; this also keeps Paste consistent
+// with Copy/Cut, which have no menu guard. It bails as a graceful no-op when
+// nothing is focused (checked before the clipboard read, so an unfocused Ctrl+V
+// spawns no command) or the clipboard read fails or is empty. Clipboard read is
+// best effort (see App.ReadClipboard): it never panics, and the synchronous read
+// is bounded so it cannot hang the loop.
+func (d *Desktop) pasteClipboard() bool {
+	if d.focused == nil {
+		return false
+	}
+	text, err := d.app.ReadClipboard()
+	if err != nil || text == "" {
+		return false
+	}
+	return d.deliverPaste(text)
+}
+
+// CopyFocused copies the focused widget's selection (or its full copyable content
+// when nothing is selected) to the system clipboard, returning true when there was
+// something to copy. It is the exported entry point behind Ctrl+C and an app's
+// Edit→Copy menu item, delegating to the same focused-widget path as the key
+// binding. It is a graceful no-op (returns false) when nothing is focused or the
+// focused widget has nothing to copy. Copy changes nothing visible, so — unlike
+// CutFocused — it requests no redraw.
+func (d *Desktop) CopyFocused() bool {
+	return d.copyFocused()
+}
+
+// CutFocused cuts the focused widget's selection to the system clipboard (the
+// widget deletes it and the desktop copies the removed text), returning true when
+// something was cut. It is the exported entry point behind Ctrl+X and an app's
+// Edit→Cut menu item, delegating to the same focused-widget path as the key
+// binding. On success it requests a redraw, since the cut mutated the widget, so a
+// menu-invoked cut paints without the caller arranging it; it is a graceful no-op
+// (returns false) when there was nothing to cut.
+func (d *Desktop) CutFocused() bool {
+	if d.cutFocused() {
+		d.RequestRedraw()
+		return true
+	}
+	return false
+}
+
+// Paste reads the system clipboard and routes it through the focused widget's
+// paste path — the same path a bracketed (terminal) paste uses. It is the exported
+// entry point behind Ctrl+V and an app's Edit→Paste menu item, returning true when
+// a non-empty clipboard read was delivered to a focused widget. Clipboard read is
+// best effort (see App.ReadClipboard): when no native reader backend is available,
+// or the read fails or is empty, Paste is a graceful no-op — it never panics and
+// does not block indefinitely.
+func (d *Desktop) Paste() bool {
+	return d.pasteClipboard()
 }
 
 // enterSuppressed reports whether Enter should currently be swallowed under the modal
