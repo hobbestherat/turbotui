@@ -150,6 +150,30 @@ func TestTabsAltArrowSwitchesFromMultiLineInput(t *testing.T) {
 	}
 }
 
+func TestTabsAltArrowSwitchTakesPriorityOverChildArrowHandler(t *testing.T) {
+	_, desktop := newTabsTestDesktop(60, 10)
+	tabs := NewTabs(desktop, Rect{X: 0, Y: 0, W: 50, H: 5})
+	greedy := NewComponent(Rect{W: 12, H: 1})
+	greedy.Focusable = true
+	greedy.OnTypeFn = func(_ *VisualComponent, event tui.TypeEvent) bool {
+		return event.Key == tui.KeyRight && event.Alt
+	}
+	next := NewTextBox("", Rect{W: 12, H: 1})
+	tabs.AddTab("Greedy", greedy)
+	tabs.AddTab("Next", next)
+	desktop.AddLayer(NewLayer("tabs", tabs, true, false))
+	desktop.SetFocus(greedy)
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRight, Alt: true})
+
+	if tabs.Active() != 1 {
+		t.Fatalf("Alt+Right should switch tabs before active content handles it; active tab = %d, want 1", tabs.Active())
+	}
+	if !next.Component.Focused() {
+		t.Fatalf("Alt+Right should focus the first focusable in the newly active tab")
+	}
+}
+
 func TestTabsPlainTabCyclesFocusWithinActiveTab(t *testing.T) {
 	_, desktop := newTabsTestDesktop(70, 10)
 	root := NewComponent(Rect{X: 0, Y: 0, W: 70, H: 10})
