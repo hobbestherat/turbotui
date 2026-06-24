@@ -59,6 +59,31 @@ func TestTabsRenderStripAndOnlyActiveContent(t *testing.T) {
 	}
 }
 
+func TestTabsActiveLabelUsesActiveStyle(t *testing.T) {
+	app, desktop := newTabsTestDesktop(24, 4)
+	tabs := NewTabs(desktop, Rect{X: 0, Y: 0, W: 20, H: 3})
+	tabs.FG = tui.ANSIColor(1)
+	tabs.BG = tui.ANSIColor(2)
+	tabs.ActiveFG = tui.ANSIColor(3)
+	tabs.ActiveBG = tui.ANSIColor(4)
+	tabs.AddTab("One", NewLabel("first", Rect{W: 10, H: 1}))
+	tabs.AddTab("Two", NewLabel("second", Rect{W: 10, H: 1}))
+	desktop.AddLayer(NewLayer("tabs", tabs, true, false))
+
+	desktop.Redraw()
+
+	active := app.ReadCell(1, 0)
+	if active.FG != tabs.ActiveFG || active.BG != tabs.ActiveBG || !active.Bold {
+		t.Fatalf("active tab cell style = fg %v bg %v bold %v, want fg %v bg %v bold true",
+			active.FG, active.BG, active.Bold, tabs.ActiveFG, tabs.ActiveBG)
+	}
+	inactive := app.ReadCell(6, 0)
+	if inactive.FG != tabs.FG || inactive.BG != tabs.BG || inactive.Bold {
+		t.Fatalf("inactive tab cell style = fg %v bg %v bold %v, want fg %v bg %v bold false",
+			inactive.FG, inactive.BG, inactive.Bold, tabs.FG, tabs.BG)
+	}
+}
+
 func TestTabsKeyboardSwitchesAndFiresOnTabChange(t *testing.T) {
 	_, desktop := newTabsTestDesktop(60, 10)
 	tabs := NewTabs(desktop, Rect{X: 0, Y: 0, W: 50, H: 5})
@@ -105,6 +130,26 @@ func TestTabsKeyboardSwitchesAndFiresOnTabChange(t *testing.T) {
 	}
 }
 
+func TestTabsAltArrowSwitchesFromMultiLineInput(t *testing.T) {
+	_, desktop := newTabsTestDesktop(60, 12)
+	tabs := NewTabs(desktop, Rect{X: 0, Y: 0, W: 50, H: 6})
+	first := NewMultiLineInput("line one\nline two", Rect{W: 20, H: 3})
+	second := NewTextBox("", Rect{W: 12, H: 1})
+	tabs.AddTab("Notes", first)
+	tabs.AddTab("Next", second)
+	desktop.AddLayer(NewLayer("tabs", tabs, true, false))
+	desktop.SetFocus(first)
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyRight, Alt: true})
+
+	if tabs.Active() != 1 {
+		t.Fatalf("Alt+Right from multiline input active tab = %d, want 1", tabs.Active())
+	}
+	if !second.Component.Focused() {
+		t.Fatalf("Alt+Right from multiline input should focus first field in new tab")
+	}
+}
+
 func TestTabsPlainTabCyclesFocusWithinActiveTab(t *testing.T) {
 	_, desktop := newTabsTestDesktop(70, 10)
 	root := NewComponent(Rect{X: 0, Y: 0, W: 70, H: 10})
@@ -146,6 +191,32 @@ func TestTabsPlainTabCyclesFocusWithinActiveTab(t *testing.T) {
 	}
 }
 
+func TestTabsClickingTabLabelFocusesNewTabFromOutside(t *testing.T) {
+	_, desktop := newTabsTestDesktop(50, 8)
+	root := NewComponent(Rect{X: 0, Y: 0, W: 50, H: 8})
+	tabs := NewTabs(desktop, Rect{X: 0, Y: 0, W: 35, H: 4})
+	first := NewTextBox("", Rect{W: 10, H: 1})
+	second := NewTextBox("", Rect{W: 10, H: 1})
+	outside := NewTextBox("", Rect{X: 40, Y: 0, W: 8, H: 1})
+	tabs.AddTab("First", first)
+	tabs.AddTab("Second", second)
+	root.AddChild(tabs)
+	root.AddChild(outside)
+	desktop.AddLayer(NewLayer("root", root, true, false))
+	desktop.SetFocus(outside)
+
+	// " First " occupies x=[0,7), so x=8 is inside " Second ".
+	desktop.handleClick(tui.ClickEvent{X: 8, Y: 0, Button: tui.MouseLeft, Down: true})
+	desktop.handleClick(tui.ClickEvent{X: 8, Y: 0, Button: tui.MouseLeft, Down: false})
+
+	if tabs.Active() != 1 {
+		t.Fatalf("clicking second tab active tab = %d, want 1", tabs.Active())
+	}
+	if !second.Component.Focused() {
+		t.Fatalf("clicking a tab from outside should move focus into the newly active tab")
+	}
+}
+
 func TestTabsClickingTabLabelActivatesTab(t *testing.T) {
 	_, desktop := newTabsTestDesktop(40, 6)
 	tabs := NewTabs(desktop, Rect{X: 2, Y: 1, W: 30, H: 4})
@@ -179,6 +250,10 @@ func TestTabsEmptyAndOutOfRangeAreNoOps(t *testing.T) {
 	if tabs.ActiveContent() != nil {
 		t.Fatalf("empty tabs ActiveContent should be nil")
 	}
+	tabs.AddTab("Nil", nil)
+	if tabs.Count() != 0 {
+		t.Fatalf("nil content should not add a tab, got count %d", tabs.Count())
+	}
 	if handled := tabs.HandleType(tui.TypeEvent{Key: tui.KeyRight, Alt: true}); handled {
 		t.Fatalf("empty tabs should not consume Alt+Right")
 	}
@@ -193,6 +268,37 @@ func TestTabsEmptyAndOutOfRangeAreNoOps(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("out-of-range SetActive fired OnTabChange %d times", calls)
+	}
+}
+
+func TestRadioGroupPreservesExistingCheckboxCallbacks(t *testing.T) {
+	var lowCalls []bool
+	var highCalls []bool
+	low := NewCheckbox("low", Rect{W: 8, H: 1}, func(checked bool) {
+		lowCalls = append(lowCalls, checked)
+	})
+	high := NewCheckbox("high", Rect{W: 8, H: 1}, func(checked bool) {
+		highCalls = append(highCalls, checked)
+	})
+	group := NewRadioGroup().Add(low).Add(high)
+
+	high.toggle()
+	if group.Selected() != 1 || !high.Checked || low.Checked {
+		t.Fatalf("high toggle did not settle as exclusive selection")
+	}
+	if !reflect.DeepEqual(highCalls, []bool{true}) {
+		t.Fatalf("high callback calls = %v, want [true]", highCalls)
+	}
+
+	high.toggle()
+	if group.Selected() != 1 || !high.Checked {
+		t.Fatalf("re-clicking selected radio should restore high as checked")
+	}
+	if !reflect.DeepEqual(highCalls, []bool{true, true}) {
+		t.Fatalf("selected radio callback should see settled state, got %v", highCalls)
+	}
+	if len(lowCalls) != 0 {
+		t.Fatalf("low callback should not fire when low is unchecked programmatically, got %v", lowCalls)
 	}
 }
 
@@ -235,6 +341,32 @@ func TestRadioGroupSelectionIsExclusive(t *testing.T) {
 	group.SetSelected(-1)
 	if group.Selected() != -1 || group.Value() != "" || low.Checked || normal.Checked || high.Checked {
 		t.Fatalf("SetSelected(-1) should clear selection")
+	}
+}
+
+func TestMultiSelectPreservesExistingCheckboxCallbacks(t *testing.T) {
+	var callbackStates []bool
+	api := NewCheckbox("API", Rect{W: 8, H: 1}, func(checked bool) {
+		callbackStates = append(callbackStates, checked)
+	})
+	group := NewMultiSelect().Add(api)
+
+	changes := 0
+	group.OnChange = func() {
+		changes++
+	}
+
+	api.toggle()
+	api.toggle()
+
+	if !reflect.DeepEqual(callbackStates, []bool{true, false}) {
+		t.Fatalf("checkbox callback states = %v, want [true false]", callbackStates)
+	}
+	if changes != 2 {
+		t.Fatalf("group OnChange calls = %d, want 2", changes)
+	}
+	if got := group.Selected(); len(got) != 0 {
+		t.Fatalf("Selected after toggling off = %v, want empty", got)
 	}
 }
 
