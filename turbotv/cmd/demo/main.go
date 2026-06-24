@@ -33,20 +33,22 @@ func main() {
 		bounds := component.AbsoluteBounds()
 		surface.DrawBox(tv.Rect{X: 0, Y: 1, W: bounds.W, H: bounds.H - 1}, tui.LineSingle, tui.ANSIColor(15), tui.ANSIColor(4))
 	}
+	// The menu Shortcut fields are display-only hints; the accelerators fire because
+	// the same action closures are registered as Global bindings on the desktop's
+	// single registry below.
+	confirmAction := func() {
+		tv.ShowConfirmYesNo(desktop, "Confirm", "Apply values?", func(value bool) {
+			if value {
+				cityBox.SetText("Saved")
+			} else {
+				cityBox.SetText("Canceled")
+			}
+		})
+	}
 	menu := tv.NewMenuBar(tv.Rect{X: 0, Y: 0, W: app.Width(), H: 1},
 		tv.NewSubMenu("&File",
-			tv.NewMenuItem("&Confirm", func() {
-				tv.ShowConfirmYesNo(desktop, "Confirm", "Apply values?", func(value bool) {
-					if value {
-						cityBox.SetText("Saved")
-					} else {
-						cityBox.SetText("Canceled")
-					}
-				})
-			}).WithShortcut("Ctrl+S", tui.KeyRune, 's', true),
-			tv.NewMenuItem("E&xit", func() {
-				stop()
-			}).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
+			tv.NewMenuItem("&Confirm", confirmAction).WithShortcut("Ctrl+S", tui.KeyRune, 's', true),
+			tv.NewMenuItem("E&xit", stop).WithShortcut("Ctrl+Q", tui.KeyRune, 'q', true),
 		),
 		tv.NewSubMenu("&Help",
 			tv.NewMenuItem("&About", func() {
@@ -55,6 +57,14 @@ func main() {
 		),
 	)
 	desktop.SetMenuBar(menu)
+	desktop.Bindings().Register(
+		tv.KeyBinding{Chord: tv.Chord{Rune: 's', Ctrl: true}, Scope: tv.ScopeGlobal},
+		func() bool { confirmAction(); return true },
+	)
+	desktop.Bindings().Register(
+		tv.KeyBinding{Chord: tv.Chord{Rune: 'q', Ctrl: true}, Scope: tv.ScopeGlobal},
+		func() bool { stop(); return true },
+	)
 	desktop.AddLayer(tv.NewFullscreenLayer("base", root))
 
 	window := tv.NewWindow("Main Window", tv.Rect{X: 6, Y: 3, W: 80, H: 22}, tui.LineDouble)

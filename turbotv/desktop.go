@@ -36,10 +36,11 @@ type Desktop struct {
 	focused        *VisualComponent
 	mouseCapture   *VisualComponent
 	menuBar        *MenuBar
-	// bindings is the desktop's durable BindingRegistry for the Focus and
-	// Fallthrough scopes (see ScopedBindings). Unlike the menubar's Global registry
-	// (Bindings), it is NOT reset by a menu rebuild, so scoped bindings an app
-	// registers survive RebuildBindings. It is lazily created by ScopedBindings.
+	// bindings is the desktop's single, durable BindingRegistry holding Global,
+	// Focus and Fallthrough entries — every scope lives in one place (gogent #401).
+	// Both Bindings() and ScopedBindings() return it. Because the menu bar no longer
+	// owns or rebuilds a registry, a Global accelerator registered here survives a
+	// menu rebuild instead of being dropped. It is lazily created by registry().
 	bindings       *BindingRegistry
 	unhandledKeyFn func(event tui.TypeEvent)
 	onResize       []func()
@@ -201,72 +202,63 @@ func (d *Desktop) RecentlyTyped(within time.Duration) bool {
 // Ctrl-accelerators) and keyboard navigation while open. Do NOT also add it to a
 // layer.
 //
-// Installing a menubar re-syncs its BindingRegistry from the current menu tree, so
-// a bar whose Menus were assembled or mutated before being set is reflected on the
-// accelerator path without the caller having to call RebuildBindings. Mutating the
-// tree of an already-installed bar still requires MenuBar.RebuildBindings.
+// The menu bar is a pure view: it draws popups, handles click/mnemonic activation
+// via OnSelect, and renders shortcut hints, but it does NOT own a BindingRegistry
+// or register accelerators from its tree. Global accelerators live on the Desktop's
+// single registry (see Bindings); an application registers them there.
 func (d *Desktop) SetMenuBar(bar *MenuBar) {
 	d.menuBar = bar
 	if bar != nil {
 		bar.Component.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: 1})
-		bar.RebuildBindings()
 	}
 }
 
-// Bindings returns the active menubar's persistent BindingRegistry — the single
-// instance the desktop consults for menu accelerators — or nil when no menubar is
-// set. It is the toolkit's first-class view of "which chord triggers which action"
-// and the seam later binding scopes will hang off; it does not change the dispatch
-// chain in handleType (only MenuBar.HandleAccelerator consults it). The returned
-// registry is owned by the menubar and is re-synced from the menu tree by
-// MenuBar.RebuildBindings.
-//
-// Phase-1 caveat: the instance is stable, but its contents are owned by the menu
-// tree. A caller may Register an extra binding and it persists until the next
-// RebuildBindings, which resets the registry to the menu bindings and drops the
-// extra. For durable non-menu scopes (Focus/Fallthrough) use ScopedBindings, which
-// survives a menu rebuild.
-//
-// Scope correspondence: this registry is the Global scope. Its consumers (Match,
-// Dispatch via HandleAccelerator) only ever surface ScopeGlobal bindings, so a
-// Focus or Fallthrough binding registered here is inert — it will not fire as a
-// global accelerator. Register scoped bindings into ScopedBindings instead.
-//
-// Like the rest of the desktop, the registry is loop-confined: query or mutate it
-// (Match/Register/Clear) only on the event-loop goroutine or via Post, since the
-// accelerator path reads it there (see the Desktop threading contract).
-func (d *Desktop) Bindings() *BindingRegistry {
-	if d.menuBar == nil {
-		return nil
-	}
-	return d.menuBar.Registry()
-}
-
-// ScopedBindings returns the desktop's durable BindingRegistry for the Focus and
-// Fallthrough scopes, creating it on first use (it is never nil). This is the
-// phase-2 home the Bindings() doc anticipated: bindings registered here outlive a
-// menu RebuildBindings, because they belong to the desktop, not the menu tree.
-//
-// handleType consults it at two existing dispatch positions: ScopeFocus bindings at
-// the focused-widget stage (after the focused widget declines the key, scoped to the
-// binding's Target via focus-within) and ScopeFallthrough bindings at the
-// unhandledKeyFn stage (before the app's unhandled-key handler). With nothing
-// registered here both checks are inert, so the dispatch chain is unchanged.
-//
-// Use Bindings() for Global menu accelerators; register Focus/Fallthrough bindings
-// here. Scope correspondence: this registry is consulted ONLY through DispatchFocus
-// and DispatchFallthrough, so a ScopeGlobal binding registered here is inert (it
-// fires nowhere — register Global accelerators on the menu via Bindings()). The
-// mismatch is benign (dead, not dangerous) but silent, so keep each scope in its
-// own registry.
-//
-// Like the rest of the desktop, the registry is loop-confined: query or mutate it
-// only on the event-loop goroutine or via Post (see the Desktop threading contract).
-func (d *Desktop) ScopedBindings() *BindingRegistry {
+// registry returns the desktop's single BindingRegistry, creating it on first use
+// (it is never nil). Both Bindings() and ScopedBindings() return it — they are two
+// names for the one registry that holds Global, Focus and Fallthrough entries.
+func (d *Desktop) registry() *BindingRegistry {
 	if d.bindings == nil {
 		d.bindings = NewBindingRegistry()
 	}
 	return d.bindings
+}
+
+// Bindings returns the desktop's single BindingRegistry, creating it on first use
+// (it is never nil, with or without a menubar). It is the toolkit's first-class view
+// of "which chord triggers which action" and the home for all three scopes — Global
+// accelerators, Focus bindings, and Fallthrough bindings all live in this one
+// registry (gogent #401). It is the SAME instance ScopedBindings returns.
+//
+// handleType dispatches Global-scope entries from this registry at the menu-
+// accelerator stage (gated by the modal-suppression menuInScope guard), before the
+// focused widget sees the key. Because the menu bar no longer owns or rebuilds a
+// registry, a Global accelerator registered here is durable: it survives a menu
+// rebuild instead of being dropped. Register Focus/Fallthrough bindings here too;
+// their scope decides where they are consulted (see Scope).
+//
+// Like the rest of the desktop, the registry is loop-confined: query or mutate it
+// (Match/Register/Clear/Rebind) only on the event-loop goroutine or via Post, since
+// the dispatch path reads it there (see the Desktop threading contract).
+func (d *Desktop) Bindings() *BindingRegistry {
+	return d.registry()
+}
+
+// ScopedBindings returns the desktop's single BindingRegistry — the SAME instance
+// as Bindings(), creating it on first use (it is never nil). It is retained as a
+// distinct accessor for callers that register durable Focus/Fallthrough bindings;
+// since #401 unified the registries there is no separate scoped registry, so the two
+// names are interchangeable.
+//
+// handleType consults the Focus and Fallthrough entries at their two dispatch
+// positions: ScopeFocus bindings at the focused-widget stage (after the focused
+// widget declines the key, scoped to the binding's Target via focus-within) and
+// ScopeFallthrough bindings at the unhandledKeyFn stage (before the app's
+// unhandled-key handler).
+//
+// Like the rest of the desktop, the registry is loop-confined: query or mutate it
+// only on the event-loop goroutine or via Post (see the Desktop threading contract).
+func (d *Desktop) ScopedBindings() *BindingRegistry {
+	return d.registry()
 }
 
 // AddLayer pushes a layer onto the top of the stack. Must be called on the event
@@ -826,8 +818,13 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 			return
 		}
 	}
-	// Ctrl accelerators from the menubar, unless a modal layer blocks it.
-	if d.menuInScope() && d.menuBar.HandleAccelerator(event) {
+	// Global accelerators from the unified registry, fired before the focused widget,
+	// unless a modal layer blocks them. The menuInScope guard preserves the modal
+	// suppression exactly as it wrapped the old menuBar.HandleAccelerator call (it is
+	// false when no menubar is set or a modal sits on top). A successful dispatch
+	// closes any open menu, mirroring HandleAccelerator's openPath/hoverPath reset.
+	if d.menuInScope() && d.bindings != nil && d.bindings.Dispatch(event) {
+		d.menuBar.CloseMenus()
 		d.RequestRedraw()
 		return
 	}

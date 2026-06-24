@@ -571,8 +571,16 @@ func TestMenuAcceleratorCoalesces(t *testing.T) {
 	counter := &frameCounter{}
 	desktop, menu := newMenuDesktop(t, counter)
 	fired := 0
-	// Observe the accelerator firing via the leaf's OnSelect (Children[2] = Quit).
+	// Accelerators are registered on the desktop registry; the menu keeps only the
+	// displayed shortcut hint.
 	menu.Menus[0].Children[2].OnSelect = func() { fired++ }
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'q', Ctrl: true}, ActionID: "app.quit", Scope: ScopeGlobal},
+		func() bool {
+			menu.Menus[0].Children[2].OnSelect()
+			return true
+		},
+	)
 	desktop.handleType(altRune('f')) // open
 	if !menu.IsOpen() {
 		t.Fatalf("expected File menu open")

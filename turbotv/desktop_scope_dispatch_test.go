@@ -33,7 +33,7 @@ func scopedDesktop(t *testing.T, typed *int) (*Desktop, *VisualComponent) {
 	return desktop, window
 }
 
-// --- ScopedBindings accessor: lazy, stable, distinct from the menu registry. ---
+// --- ScopedBindings accessor: lazy, stable, and unified with global bindings. ---
 
 func TestScopedBindingsIsLazyAndStable(t *testing.T) {
 	desktop := newTestDesktop(t, 40, 12)
@@ -46,7 +46,7 @@ func TestScopedBindingsIsLazyAndStable(t *testing.T) {
 	}
 }
 
-func TestScopedBindingsDistinctFromMenuBindings(t *testing.T) {
+func TestScopedBindingsSameAsMenuBindings(t *testing.T) {
 	desktop := newTestDesktop(t, 40, 12)
 	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
 		NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
@@ -54,13 +54,14 @@ func TestScopedBindingsDistinctFromMenuBindings(t *testing.T) {
 	desktop.SetMenuBar(bar)
 	menuReg := desktop.Bindings()
 	scopedReg := desktop.ScopedBindings()
-	if menuReg == scopedReg {
-		t.Fatal("the scoped (Focus/Fallthrough) registry must be distinct from the menu (Global) registry")
+	if menuReg != scopedReg {
+		t.Fatal("Bindings() and ScopedBindings() must return the same unified registry")
 	}
-	// Registering into the scoped registry must not affect the menu registry.
+	// Registering scoped entries through one accessor is visible through the other;
+	// scope filters, not separate registries, decide where they dispatch.
 	scopedReg.Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: '?'}, Scope: ScopeFallthrough}, nil)
 	if menuReg.Len() != 1 {
-		t.Fatalf("menu registry Len = %d, want 1 (scoped registration must not leak)", menuReg.Len())
+		t.Fatalf("unified registry Len = %d, want 1", menuReg.Len())
 	}
 }
 
@@ -366,16 +367,18 @@ func TestAllThreeScopesFireAtTheirOwnPositions(t *testing.T) {
 	typed := 0
 	desktop, window := scopedDesktop(t, &typed)
 
-	// Global menu accelerator (Ctrl+N) via the menu registry.
+	// Global accelerator (Ctrl+N) via the unified desktop registry.
 	menuFired := 0
 	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
-		NewSubMenu("&File", NewMenuItem("New", func() { menuFired++ }).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
+		NewSubMenu("&File", NewMenuItem("New", nil).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
 	)
 	desktop.SetMenuBar(bar)
 
 	// Focus 'r' (scoped to the focused window) and Fallthrough '?'.
 	focusFired, fallFired := 0, 0
 	reg := desktop.ScopedBindings()
+	reg.Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}, Scope: ScopeGlobal},
+		func() bool { menuFired++; return true })
 	reg.Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'r'}, Scope: ScopeFocus, Target: window},
 		func() bool { focusFired++; return true })
 	reg.Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: '?'}, Scope: ScopeFallthrough},
