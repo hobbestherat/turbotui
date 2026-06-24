@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -117,8 +118,10 @@ func nativeClipboardCopy(text string) {
 }
 
 // errNoClipboardReader is returned by ReadClipboard when no native clipboard-read
-// command is available on the host. Callers treat it as "nothing to paste" and
-// no-op gracefully rather than surfacing an error to the user.
+// command is present on the host at all. It is distinct from the error returned
+// when a reader was found but failed (which wraps that backend's own error), so a
+// caller can tell "nothing installed" from "installed but broke". Either way the
+// Ctrl+V / Paste path treats a non-nil error as "nothing to paste" and no-ops.
 var errNoClipboardReader = errors.New("turbotui: no clipboard reader available")
 
 // clipboardReadCmd is one native clipboard-read backend: the command name looked
@@ -164,10 +167,13 @@ var clipboardReadRun = func(name string, args ...string) ([]byte, error) {
 // Reading the clipboard from a terminal is not universally possible — OSC 52 is a
 // write-oriented protocol and its read-query is unreliable — so ReadClipboard is
 // the paste counterpart to CopyToClipboard's native fallback, not a guaranteed
-// channel. When no reader backend is available it returns errNoClipboardReader
-// (and never panics or blocks indefinitely), letting the Ctrl+V / Paste path
-// no-op gracefully.
+// channel. It never panics or blocks indefinitely. When no reader backend is
+// present at all it returns errNoClipboardReader; when one or more backends were
+// found but every invocation failed it returns the last failure (wrapped), so the
+// two cases are distinguishable. The Ctrl+V / Paste path treats any non-nil error
+// as "nothing to paste" and no-ops gracefully.
 func (a *App) ReadClipboard() (string, error) {
+	var lastErr error
 	for _, r := range clipboardReaders {
 		path, err := clipboardLookPath(r.name)
 		if err != nil {
@@ -175,9 +181,13 @@ func (a *App) ReadClipboard() (string, error) {
 		}
 		out, err := clipboardReadRun(path, r.args...)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		return string(out), nil
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("turbotui: clipboard read failed: %w", lastErr)
 	}
 	return "", errNoClipboardReader
 }

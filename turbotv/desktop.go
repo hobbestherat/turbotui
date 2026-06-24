@@ -855,10 +855,14 @@ func (d *Desktop) handleType(event tui.TypeEvent) {
 		return
 	}
 	// Ctrl+V reads the system clipboard and routes it through the focused widget's
-	// paste path — the same path bracketed paste uses. Consumed only when there was
-	// a focused widget to receive a non-empty read; a failed or empty clipboard read
-	// is a graceful no-op (pasteClipboard handles its own redraw via handlePaste).
-	if isPasteKey(event) && d.pasteClipboard() {
+	// paste path — the same path bracketed paste uses. Unlike Ctrl+C/Ctrl+X (which
+	// fall through to a quit handler when there is nothing to copy/cut), Ctrl+V has
+	// no fall-through purpose, so it is always consumed once recognised: a failed or
+	// empty clipboard read is a true graceful no-op that does NOT leak the keystroke
+	// to the focused widget, scoped bindings, or the unhandled-key handler.
+	// pasteClipboard handles its own redraw via handlePaste on a successful paste.
+	if isPasteKey(event) {
+		d.pasteClipboard()
 		return
 	}
 	// Only deliver to the focused widget when it (and all its ancestors) are
