@@ -76,6 +76,27 @@ func (s *Select) SetSelected(index int) {
 	s.Selected = index
 }
 
+// SetOptions replaces the dropdown's option list. The current selection is
+// preserved when its value still exists among the new options; otherwise it
+// clamps to 0. Any open popup is closed.
+func (s *Select) SetOptions(opts []string) {
+	prev := s.Value()
+	s.close()
+	s.Options = opts
+	s.Selected = 0
+	if prev != "" {
+		for i, opt := range opts {
+			if opt == prev {
+				s.Selected = i
+				break
+			}
+		}
+	}
+	// Reset scroll/cursor state so the next open starts from a consistent view.
+	s.offset = 0
+	s.highlight = s.Selected
+}
+
 func (s *Select) IsOpen() bool {
 	return s.popup != nil
 }
