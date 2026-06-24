@@ -156,6 +156,16 @@ func TestMenuAcceleratorPasteWorksWhileMenuIsOpen(t *testing.T) {
 		),
 	)
 	desktop.SetMenuBar(menu)
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'v', Ctrl: true}, ActionID: "edit.paste", Scope: ScopeGlobal},
+		func() bool {
+			menuSelects++
+			if !desktop.Paste() {
+				t.Fatalf("Desktop.Paste returned false from an open menu callback")
+			}
+			return true
+		},
+	)
 	if !menu.OpenTopByMnemonic('e') {
 		t.Fatalf("failed to open Edit menu")
 	}

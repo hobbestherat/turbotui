@@ -199,6 +199,10 @@ func TestAcceleratorFiresWhileMenuOpen(t *testing.T) {
 		),
 	)
 	desktop.SetMenuBar(menu)
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'q', Ctrl: true}, ActionID: "app.quit", Scope: ScopeGlobal},
+		func() bool { quit++; return true },
+	)
 	base := NewComponent(Rect{X: 0, Y: 0, W: 60, H: 16})
 	desktop.AddLayer(NewFullscreenLayer("base", base))
 

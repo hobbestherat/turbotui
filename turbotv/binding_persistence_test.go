@@ -6,202 +6,115 @@ import (
 	tui "github.com/hobbestherat/turbotui"
 )
 
-// Round-2 tests: the registry is now a PERSISTENT instance owned by the MenuBar
-// (built by NewMenuBar, re-synced by RebuildBindings) instead of being rebuilt per
-// keystroke. These pin the new ownership contract and, adversarially, document the
-// staleness it introduces relative to the pre-refactor per-keystroke walk.
-
 func ctrlN() tui.TypeEvent { return tui.TypeEvent{Key: tui.KeyRune, Rune: 'n', Ctrl: true} }
 func ctrlM() tui.TypeEvent { return tui.TypeEvent{Key: tui.KeyRune, Rune: 'm', Ctrl: true} }
 
-// --- Persistent identity: Registry()/Bindings() return the same instance. ---
-
-func TestRegistryIsPersistentInstance(t *testing.T) {
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
-		NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
-	)
-	r1 := bar.Registry()
-	r2 := bar.Registry()
-	if r1 != r2 {
-		t.Fatal("Registry() must return the same persistent instance across calls")
-	}
-
+func TestDesktopBindingsAndScopedBindingsAreOneRegistry(t *testing.T) {
 	desktop := newTestDesktop(t, 40, 12)
-	desktop.SetMenuBar(bar)
-	if desktop.Bindings() != r1 {
-		t.Fatal("Desktop.Bindings() must expose the menubar's persistent registry, not a copy")
+
+	bindings := desktop.Bindings()
+	scoped := desktop.ScopedBindings()
+	if bindings == nil {
+		t.Fatal("Desktop.Bindings() must create and return the unified registry")
+	}
+	if bindings != scoped {
+		t.Fatal("Desktop.Bindings() and Desktop.ScopedBindings() must return the same registry instance")
+	}
+
+	bindings.Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}, ActionID: "file.new"}, nil)
+	if got, ok := scoped.Match(ctrlN()); !ok || got.ActionID != "file.new" {
+		t.Fatalf("registration through Bindings must be visible through ScopedBindings: got %q ok=%v", got.ActionID, ok)
 	}
 }
 
-// A struct-literal MenuBar (assembled without NewMenuBar) must lazily build its
-// registry on first Registry() call.
-func TestRegistryLazyBuildsForStructLiteralMenuBar(t *testing.T) {
-	bar := &MenuBar{
-		Menus: []*MenuItem{
-			NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
-		},
-	}
-	got, ok := bar.Registry().Match(ctrlN())
-	if !ok || got.Chord.Rune != 'n' {
-		t.Fatalf("lazy Registry() must build from the menu tree: %+v ok=%v", got, ok)
-	}
-	// And HandleAccelerator works on a lazily-built registry too.
-	fired := false
-	bar.Menus[0].Children[0].OnSelect = func() { fired = true }
-	if !bar.HandleAccelerator(ctrlN()) || !fired {
-		t.Fatal("HandleAccelerator must fire through a lazily-built registry")
-	}
-}
-
-// --- Caller registrations persist (the fix for the ephemeral-registry footgun). ---
-
-func TestCallerRegistrationPersistsAndIsConsulted(t *testing.T) {
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
-		NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
-	)
-	fired := false
-	bar.Registry().Register(
-		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'k', Ctrl: true}, ActionID: "palette"},
-		func() bool { fired = true; return true },
-	)
-	// The extra binding must still be present on the next access...
-	if _, ok := bar.Registry().Match(tui.TypeEvent{Key: tui.KeyRune, Rune: 'k', Ctrl: true}); !ok {
-		t.Fatal("a caller-registered binding must persist across Registry() calls")
-	}
-	// ...and the accelerator path (which goes through the same instance) must fire it.
-	if !bar.HandleAccelerator(tui.TypeEvent{Key: tui.KeyRune, Rune: 'k', Ctrl: true}) || !fired {
-		t.Fatal("HandleAccelerator must consult the persistent registry including caller bindings")
-	}
-}
-
-// --- Live vs snapshot semantics. ---
-
-// Enabled toggles are read LIVE (no rebuild needed) — preserved behaviour.
-func TestEnabledToggleIsLiveWithoutRebuild(t *testing.T) {
+func TestMenuShortcutIsDisplayOnlyAndDoesNotRegisterAccelerator(t *testing.T) {
+	desktop := newTestDesktop(t, 40, 12)
 	fired := 0
-	item := NewMenuItem("New", func() { fired++ }).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File", item))
-
-	item.Enabled = false
-	if bar.HandleAccelerator(ctrlN()) {
-		t.Fatal("disabling an item must take effect live (no rebuild) — accelerator must not fire")
-	}
-	item.Enabled = true
-	if !bar.HandleAccelerator(ctrlN()) || fired != 1 {
-		t.Fatalf("re-enabling must take effect live; fired=%d", fired)
-	}
-}
-
-// OnSelect swaps are read LIVE too.
-func TestOnSelectSwapIsLiveWithoutRebuild(t *testing.T) {
-	item := NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File", item))
-	swapped := false
-	item.OnSelect = func() { swapped = true }
-	bar.HandleAccelerator(ctrlN())
-	if !swapped {
-		t.Fatal("a swapped OnSelect must be invoked live by the accelerator")
-	}
-}
-
-// FINDING (behaviour change vs pre-refactor): the chord is SNAPSHOTTED at
-// registration time. Re-binding an item's Shortcut after construction is NOT
-// reflected until RebuildBindings() — the pre-refactor matchShortcut read
-// item.Shortcut live every keystroke, so it would have matched the new chord
-// immediately. This test pins the new (stale) contract so the regression is
-// explicit; an app that mutates chords in place MUST call RebuildBindings.
-func TestChordRebindIsStaleUntilRebuild(t *testing.T) {
-	item := NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File", item))
-
-	// Re-bind to Ctrl+M in place, WITHOUT calling RebuildBindings.
-	item.WithShortcut("Ctrl+M", tui.KeyRune, 'm', true)
-
-	// New chord does NOT fire yet; the stale snapshot still matches the OLD chord.
-	if bar.HandleAccelerator(ctrlM()) {
-		t.Fatal("Ctrl+M should not fire before RebuildBindings (chord is snapshotted)")
-	}
-	if !bar.HandleAccelerator(ctrlN()) {
-		t.Fatal("stale registry still matches the OLD Ctrl+N chord until rebuild — pinning the behaviour change")
-	}
-
-	// After RebuildBindings the new chord is live and the old one is gone.
-	bar.RebuildBindings()
-	if !bar.HandleAccelerator(ctrlM()) {
-		t.Fatal("after RebuildBindings the new Ctrl+M chord must fire")
-	}
-	if bar.HandleAccelerator(ctrlN()) {
-		t.Fatal("after RebuildBindings the old Ctrl+N chord must no longer match")
-	}
-}
-
-// FINDING (same class): ActionID is snapshotted at registration; changing it in
-// place is not reflected by Match until RebuildBindings.
-func TestActionIDIsSnapshottedUntilRebuild(t *testing.T) {
-	item := NewMenuItem("New", func() {}).
+	item := NewMenuItem("New", func() { fired++ }).
 		WithShortcut("Ctrl+N", tui.KeyRune, 'n', true).
 		WithActionID("file.new")
 	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File", item))
+	desktop.SetMenuBar(bar)
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 40, H: 12})))
 
-	item.WithActionID("file.create") // mutate in place, no rebuild
-	got, _ := bar.Registry().Match(ctrlN())
-	if got.ActionID != "file.new" {
-		t.Fatalf("ActionID is snapshotted; Match should still report %q, got %q", "file.new", got.ActionID)
+	if item.Shortcut == nil || item.Shortcut.Display != "Ctrl+N" || item.ActionID != "file.new" {
+		t.Fatal("menu item should retain display metadata")
 	}
-	bar.RebuildBindings()
-	got, _ = bar.Registry().Match(ctrlN())
-	if got.ActionID != "file.create" {
-		t.Fatalf("after RebuildBindings Match should report %q, got %q", "file.create", got.ActionID)
+	desktop.handleType(ctrlN())
+	if fired != 0 {
+		t.Fatalf("menu Shortcut must be display-only; OnSelect fired %d times without a desktop binding", fired)
+	}
+	if _, ok := desktop.Bindings().Match(ctrlN()); ok {
+		t.Fatal("setting a menu Shortcut must not register a desktop binding")
 	}
 }
 
-// --- RebuildBindings hygiene: idempotent, picks up structural changes, drops extras. ---
+func TestDesktopGlobalBindingDispatchesThroughUnifiedRegistry(t *testing.T) {
+	desktop := newTestDesktop(t, 40, 12)
+	desktop.SetMenuBar(NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File")))
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 40, H: 12})))
 
-func TestRebuildBindingsIsIdempotentNoDuplicates(t *testing.T) {
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
+	fired := 0
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}, ActionID: "file.new", Scope: ScopeGlobal},
+		func() bool { fired++; return true },
+	)
+
+	desktop.handleType(ctrlN())
+	if fired != 1 {
+		t.Fatalf("global binding should fire through Desktop.handleType once, got %d", fired)
+	}
+}
+
+func TestDesktopGlobalBindingSurvivesMenuRebuildReplacement(t *testing.T) {
+	desktop := newTestDesktop(t, 40, 12)
+	desktop.SetMenuBar(NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
+		NewSubMenu("&File", NewMenuItem("New", nil).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
+	))
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 40, H: 12})))
+
+	fired := 0
+	reg := desktop.Bindings()
+	reg.Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'm', Ctrl: true}, ActionID: "app.commandPalette", Scope: ScopeGlobal},
+		func() bool { fired++; return true },
+	)
+
+	desktop.SetMenuBar(NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
 		NewSubMenu("&File",
-			NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true),
-			NewMenuItem("Open", func() {}).WithShortcut("Ctrl+O", tui.KeyRune, 'o', true),
+			NewMenuItem("Open", nil).WithShortcut("Ctrl+O", tui.KeyRune, 'o', true),
+			NewMenuItem("Command Palette", nil).WithShortcut("Ctrl+M", tui.KeyRune, 'm', true),
 		),
-	)
-	want := bar.Registry().Len()
-	if want != 2 {
-		t.Fatalf("expected 2 bindings after construction, got %d", want)
+	))
+
+	if desktop.Bindings() != reg {
+		t.Fatal("replacing/rebuilding the menu must not replace the desktop binding registry")
 	}
-	bar.RebuildBindings()
-	bar.RebuildBindings()
-	if got := bar.Registry().Len(); got != want {
-		t.Fatalf("RebuildBindings must Clear before re-registering (no accumulation): Len=%d, want %d", got, want)
+	desktop.handleType(ctrlM())
+	if fired != 1 {
+		t.Fatalf("desktop-registered global must survive a menu rebuild/replacement, fired=%d", fired)
 	}
 }
 
-func TestRebuildBindingsPicksUpAddedItem(t *testing.T) {
-	sub := NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true))
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, sub)
+func TestDesktopModalLayerBlocksUnifiedGlobalBinding(t *testing.T) {
+	desktop := newTestDesktop(t, 40, 12)
+	desktop.SetMenuBar(NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1}, NewSubMenu("&File")))
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 40, H: 12})))
 
-	// A newly-added item's accelerator is inert until RebuildBindings.
-	openFired := 0
-	sub.Children = append(sub.Children, NewMenuItem("Open", func() { openFired++ }).WithShortcut("Ctrl+M", tui.KeyRune, 'm', true))
-	if bar.HandleAccelerator(ctrlM()) {
-		t.Fatal("a structurally-added item must be inert before RebuildBindings")
-	}
-	bar.RebuildBindings()
-	if !bar.HandleAccelerator(ctrlM()) || openFired != 1 {
-		t.Fatalf("after RebuildBindings the added item must fire; openFired=%d", openFired)
-	}
-}
-
-func TestRebuildBindingsDropsCallerRegistrations(t *testing.T) {
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 40, H: 1},
-		NewSubMenu("&File", NewMenuItem("New", func() {}).WithShortcut("Ctrl+N", tui.KeyRune, 'n', true)),
+	fired := 0
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'n', Ctrl: true}, ActionID: "file.new", Scope: ScopeGlobal},
+		func() bool { fired++; return true },
 	)
-	bar.Registry().Register(KeyBinding{Chord: Chord{Key: tui.KeyRune, Rune: 'k', Ctrl: true}}, func() bool { return true })
-	bar.RebuildBindings()
-	if _, ok := bar.Registry().Match(tui.TypeEvent{Key: tui.KeyRune, Rune: 'k', Ctrl: true}); ok {
-		t.Fatal("RebuildBindings resets to menu bindings, so caller-registered extras are dropped (documented)")
+
+	desktop.handleType(ctrlN())
+	if fired != 1 {
+		t.Fatalf("precondition: global should fire with no modal, got %d", fired)
 	}
-	// The menu binding survives the rebuild.
-	if _, ok := bar.Registry().Match(ctrlN()); !ok {
-		t.Fatal("the menu's own binding must survive RebuildBindings")
+
+	desktop.AddLayer(NewModalLayer("modal", NewComponent(Rect{X: 5, Y: 5, W: 20, H: 5})))
+	desktop.handleType(ctrlN())
+	if fired != 1 {
+		t.Fatalf("modal layer must gate unified global dispatch, fired=%d", fired)
 	}
 }

@@ -37,14 +37,19 @@ func TestWithShortcutModBuildsShortcut(t *testing.T) {
 
 func TestFunctionKeyAcceleratorFires(t *testing.T) {
 	fired := 0
-	bar := NewMenuBar(Rect{X: 0, Y: 0, W: 20, H: 1},
+	desktop := newTestDesktop(t, 20, 5)
+	desktop.SetMenuBar(NewMenuBar(Rect{X: 0, Y: 0, W: 20, H: 1},
 		NewSubMenu("&File",
-			NewMenuItem("Help", func() { fired++ }).WithShortcutMod("F1", tui.KeyF1, 0, false, false, false),
+			NewMenuItem("Help", nil).WithShortcutMod("F1", tui.KeyF1, 0, false, false, false),
 		),
+	))
+	desktop.AddLayer(NewFullscreenLayer("base", NewComponent(Rect{X: 0, Y: 0, W: 20, H: 5})))
+	desktop.Bindings().Register(
+		KeyBinding{Chord: Chord{Key: tui.KeyF1}, ActionID: "help", Scope: ScopeGlobal},
+		func() bool { fired++; return true },
 	)
-	if !bar.HandleAccelerator(tui.TypeEvent{Key: tui.KeyF1}) {
-		t.Fatal("F1 accelerator should be handled")
-	}
+
+	desktop.handleType(tui.TypeEvent{Key: tui.KeyF1})
 	if fired != 1 {
 		t.Fatalf("expected F1 accelerator to fire once, got %d", fired)
 	}
