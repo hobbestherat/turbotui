@@ -88,7 +88,15 @@ func (c Chord) effectiveKey() tui.KeyCode {
 // UI to show). It is a thin delegation to tui.Deliverability, the single source of
 // truth that lives next to the byte→TypeEvent decoder, so the terminal-ambiguity
 // knowledge (Ctrl+M==Enter, Ctrl+[==Esc, Ctrl+Z→SIGTSTP, Ctrl+S/Q flow control,
-// Ctrl+Shift+letter indistinguishable from Ctrl+letter, …) is never duplicated here.
+// Ctrl+Shift+letter indistinguishable from Ctrl+letter on legacy terminals, …) is
+// never duplicated here.
+//
+// The verdict is capability-aware: Ctrl+Shift+<letter> reports deliverable when an
+// extended keyboard protocol (Kitty CSI-u) is confirmed active on the running
+// terminal, and reports the "indistinguishable" reason only in legacy mode. The result
+// therefore depends on terminal state at call time, so a capture UI should consult it
+// while the app is running (after the terminal is set up), not when reloading persisted
+// config before the terminal exists.
 //
 // ok=true means the chord is bindable; ok=false means a binding on it could never fire
 // distinctly. Ordinary combinations (Ctrl+N, Ctrl+F, plain letters, function keys)
