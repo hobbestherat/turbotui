@@ -739,7 +739,11 @@ func (a *App) Apply() error {
 			a.front.cells[index] = next
 		}
 	}
-	buf = a.appendCursorEscapes(buf)
+	// cursorX stays -1 only when the diff loop emitted no cell (and thus no CUP):
+	// any painted cell leaves the real hardware cursor parked just past it, so a
+	// visible caret must be re-homed below even if its desired position is unchanged.
+	cellsWritten := cursorX != -1
+	buf = a.appendCursorEscapes(buf, cellsWritten)
 	if len(buf) == bodyStart {
 		a.flushBuf = buf[:0] // nothing changed; keep the capacity, write nothing
 		return nil
@@ -769,7 +773,15 @@ const (
 
 // appendCursorEscapes appends the control sequence needed to bring the real
 // terminal cursor in line with the desired state to buf (nothing when unchanged).
-func (a *App) appendCursorEscapes(buf []byte) []byte {
+//
+// cellsWritten reports whether Apply's diff loop painted any cell this frame. A
+// painted cell leaves the real hardware cursor parked just past the last changed
+// cell, so a VISIBLE caret must be re-homed even when its desired position is
+// unchanged — otherwise the cursor visibly drifts off the input form during
+// streaming or any redraw that touches cells elsewhere while the caret is still.
+// The unchanged-position fast path is therefore valid only on a frame that painted
+// nothing (cellsWritten == false), where the real cursor never moved.
+func (a *App) appendCursorEscapes(buf []byte, cellsWritten bool) []byte {
 	// Consume the force-redraw request (set by invalidateFront): it makes both the
 	// show and hide branches below re-emit even when the front record already
 	// matches. This runs only after Apply's pre-Run suppression check, so a
@@ -777,7 +789,7 @@ func (a *App) appendCursorEscapes(buf []byte) []byte {
 	force := a.forceCursor
 	a.forceCursor = false
 	if a.cursorVisible {
-		if !force && a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
+		if !force && !cellsWritten && a.frontCursorVisible && a.frontCursorX == a.cursorX && a.frontCursorY == a.cursorY {
 			return buf
 		}
 		a.frontCursorVisible = true
