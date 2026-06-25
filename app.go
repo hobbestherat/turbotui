@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -893,10 +894,40 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
+// kittyDisambiguateFlag is the Kitty keyboard-protocol "disambiguate escape codes"
+// progressive-enhancement flag (0b1). It is the minimal flag that makes
+// Ctrl+Shift+<letter> distinct from Ctrl+<letter>: the terminal reports keys that
+// would be ambiguous in the legacy C0 encoding as CSI-u sequences (which the parser
+// already decodes), while leaving plain text input, Enter/Tab/Backspace, paste and
+// mouse untouched. See setupTerminal and extendedKeyboardActive.
+const kittyDisambiguateFlag = 1
+
+// extendedKeyboardActive records whether an extended keyboard protocol that can
+// distinguish Ctrl+Shift+<letter> from Ctrl+<letter> is *confirmed* active on the
+// current terminal. It is set true only when the terminal answers setupTerminal's
+// keyboard-protocol query (CSI ? u) with a reply carrying kittyDisambiguateFlag, and
+// cleared on teardown — so it reflects what the terminal actually supports, not merely
+// that we asked. Deliverability reads it to decide whether Ctrl+Shift+<letter> can be
+// delivered. It is a package-level atomic because it is written from the input-loop
+// goroutine (parsing the reply via dispatchEvent) and read by binding/capture callers.
+var extendedKeyboardActive atomic.Bool
+
+// setupSequence is written on entry by setupTerminal. The leading group enables the
+// four long-standing modes (alt screen, hidden cursor, mouse tracking, SGR mouse
+// encoding, bracketed paste); the trailing group pushes the Kitty disambiguate flag
+// (CSI > 1 u) and queries the terminal's current keyboard flags (CSI ? u). Both
+// trailing sequences are no-ops on terminals that don't implement the Kitty keyboard
+// protocol, so legacy terminals behave exactly as before. A capable terminal answers
+// the query, which flips extendedKeyboardActive (see dispatchEvent / capabilityReport).
+const setupSequence = "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h" +
+	"\x1b[>1u\x1b[?u"
+
 // teardownSequence resets SGR and disables the modes setupTerminal enabled
 // (bracketed paste, mouse tracking, hidden cursor, alt screen), returning the
-// normal screen. It is written before term.Restore on every teardown path.
-const teardownSequence = "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l"
+// normal screen, and pops the Kitty keyboard flags pushed on setup (CSI < u) so the
+// user's shell keyboard mode is restored. It is written before term.Restore on every
+// teardown path.
+const teardownSequence = "\x1b[0m\x1b[?2004l\x1b[?1002l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[<u"
 
 // restoreTerminal writes the teardown escape sequence and restores cooked mode.
 // It is idempotent: the second call is a no-op once restoreState is cleared.
@@ -906,6 +937,7 @@ func (a *App) restoreTerminal() {
 		_ = term.Restore(int(a.in.Fd()), a.restoreState)
 		a.restoreState = nil
 	}
+	extendedKeyboardActive.Store(false)
 	a.started = false
 }
 
@@ -922,6 +954,7 @@ func (a *App) CloseWithMessage(message string) {
 		a.restoreTerminal()
 	} else {
 		_ = a.writeOut(teardownSequence)
+		extendedKeyboardActive.Store(false)
 		a.started = false
 	}
 	message = strings.Trim(message, "\n")
@@ -942,7 +975,10 @@ func (a *App) setupTerminal() error {
 	// reader on exit (issue #9); otherwise this Run's reads on a shared stdin would
 	// fail immediately against a deadline already in the past.
 	_ = a.in.SetReadDeadline(time.Time{})
-	return a.writeOut("\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h")
+	// Start from the legacy baseline: extendedKeyboardActive only goes true if the
+	// terminal answers the keyboard-protocol query in setupSequence (see dispatchEvent).
+	extendedKeyboardActive.Store(false)
+	return a.writeOut(setupSequence)
 }
 
 func (a *App) readInput(target chan<- []byte, errorsOut chan<- error) {
@@ -983,6 +1019,12 @@ func (a *App) dispatchEvent(event any) {
 		for _, handler := range a.resizeHandlers {
 			handler(e)
 		}
+	case capabilityReport:
+		// The terminal answered our keyboard-protocol query (CSI ? <flags> u). This
+		// is not a key event and reaches no handler: it only records whether an
+		// extended protocol that can distinguish Ctrl+Shift+<letter> is active, which
+		// Deliverability consults. See setupTerminal / extendedKeyboardActive.
+		extendedKeyboardActive.Store(e.flags&kittyDisambiguateFlag != 0)
 	}
 }
 
@@ -1196,11 +1238,17 @@ func Deliverability(key KeyCode, r rune, ctrl, shift, alt bool) (ok bool, reason
 	if lower >= 'A' && lower <= 'Z' {
 		lower += 'a' - 'A'
 	}
-	// Ctrl+Shift+<letter> is indistinguishable from Ctrl+<letter> on most terminals:
-	// the legacy encoding has no bit for Shift on a control chord, so both send the
-	// same control byte. (Only kitty/CSI-u-capable terminals can tell them apart, and
-	// we cannot assume them.)
+	// Ctrl+Shift+<letter> is indistinguishable from Ctrl+<letter> in the legacy
+	// encoding: it has no bit for Shift on a control chord, so both send the same
+	// control byte. Only a kitty/CSI-u-capable terminal can tell them apart — and we
+	// know one is active when extendedKeyboardActive is set (confirmed by the terminal's
+	// reply to our keyboard-protocol query in setupTerminal). When it is, the chord is
+	// deliverable; otherwise it remains indistinguishable and we report the reason so a
+	// capture UI surfaces the limitation rather than accepting a binding that never fires.
 	if shift && lower >= 'a' && lower <= 'z' {
+		if extendedKeyboardActive.Load() {
+			return true, ""
+		}
 		return false, "Ctrl+Shift+letter is indistinguishable from Ctrl+letter on most terminals"
 	}
 	switch {
@@ -1297,6 +1345,14 @@ func parseBracketedPaste(data []byte, contentStart int) (any, int, bool) {
 	return PasteEvent{Text: text}, consumed, true
 }
 
+// capabilityReport is the parser's internal, non-key result for a terminal's reply
+// to the Kitty keyboard-protocol query (CSI ? <flags> u). It never reaches an
+// application handler: the event loop consumes it in dispatchEvent to record the
+// terminal's active keyboard flags into extendedKeyboardActive.
+type capabilityReport struct {
+	flags int
+}
+
 func parseCSI(params string, final byte) any {
 	shift, alt, ctrl := parseCSIModifiers(params)
 	switch final {
@@ -1311,6 +1367,17 @@ func parseCSI(params string, final byte) any {
 	case 'Z':
 		return TypeEvent{Key: KeyBackTab}
 	case 'u':
+		// A private-marker reply (CSI ? <flags> u) is the terminal answering
+		// setupTerminal's keyboard-protocol query, not a keypress. Surface it as the
+		// internal capabilityReport so the event loop can record the flags; never as a
+		// key. (This must precede key decoding: '?' is not a valid key parameter.)
+		if strings.HasPrefix(params, "?") {
+			flags := 0
+			if v, err := strconv.Atoi(strings.TrimPrefix(params, "?")); err == nil {
+				flags = v
+			}
+			return capabilityReport{flags: flags}
+		}
 		keyCode, mod := parseCSIParams(params)
 		shift, alt, ctrl := decodeCSIModifier(mod)
 		// Terminals in Kitty / modifyOtherKeys mode encode many keys as CSI-u. Map
@@ -1320,9 +1387,13 @@ func parseCSI(params string, final byte) any {
 		if key, ok := csiUSpecialKey(keyCode); ok {
 			return TypeEvent{Key: key, Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
-		// Modified printable keys (e.g. Ctrl+Shift+C) arrive as CSI-u when the
-		// terminal reports them; surface them as rune events.
-		if keyCode > 0x20 && keyCode != 0x7f {
+		// Modified keys arrive as CSI-u when the terminal reports them: printables
+		// (e.g. Ctrl+Shift+C), Space at codepoint 0x20 (e.g. Ctrl+Space as CSI 32;5u),
+		// and — defensively — any other non-special control codepoint. Surface them all
+		// as rune events so a key reported this way is never silently dropped (which a
+		// guard of keyCode > 0x20 would do to Space). 0x7f and 9/13/27 are handled by
+		// csiUSpecialKey above; keyCode 0 is a malformed/empty sequence and falls through.
+		if keyCode > 0 && keyCode != 0x7f {
 			return TypeEvent{Key: KeyRune, Rune: rune(keyCode), Shift: shift, Alt: alt, Ctrl: ctrl}
 		}
 	case '~':
