@@ -93,6 +93,24 @@ func (a *App) appendCursorEscapes(buf []byte, cellsWritten bool) []byte {
 Scope of change: the single added `&& !cellsWritten` clause (plus the new parameter and the
 one-line caller). Everything else is unchanged.
 
+### Why `cursorX != -1` is exactly the right signal (load-bearing)
+The fix rests on `cursorX != -1` ⟺ "the hardware cursor moved this frame." Proof from the
+loop body:
+- `cursorX` starts `-1` and is assigned (`x + width`) **only** in the changed-cell emit
+  branch, which is the **only** branch that writes a CUP + cell bytes. So `cursorX != -1` ⟺
+  at least one CUP+cell was emitted ⟺ the real cursor moved.
+- The continuation half of a wide glyph (`next.cont`, app.go:713) takes the early `continue`
+  and emits **nothing**, leaving `cursorX` untouched. The only way a frame touches a `cont`
+  cell without also emitting its lead glyph is a degenerate state (lead unchanged, cont
+  changed) — and in that case the loop writes no bytes and the cursor genuinely did not move,
+  so `cellsWritten == false` is correct, not a miss.
+- `appendStyle`/`appendRune` never move the cursor without the preceding CUP, so there is no
+  "wrote bytes but `cursorX` still `-1`" path.
+
+Equivalently, the same signal could be read off `len(buf) != bodyStart` before calling
+`appendCursorEscapes`; `cursorX != -1` is preferred only because it is local to the loop and
+needs no second length capture.
+
 ### Why `cellsWritten` only gates the *visible* branch
 - **Hidden branch:** a hidden cursor's position is invisible, so cell-write drift can't be
   seen. Its early-out (`!force && !a.frontCursorVisible`) stays valid regardless of cells
