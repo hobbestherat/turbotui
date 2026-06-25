@@ -398,8 +398,8 @@ func TestExtendedKeyboardTeardownClearsFlag(t *testing.T) {
 
 	t.Run("Close (restoreTerminal path)", func(t *testing.T) {
 		pr, pw, _ := os.Pipe()
-		defer pr.Close()
-		defer pw.Close()
+		defer func() { _ = pr.Close() }()
+		defer func() { _ = pw.Close() }()
 		var output bytes.Buffer
 		app := NewWithSize(4, 1, &output)
 		app.in = pr
@@ -417,8 +417,8 @@ func TestExtendedKeyboardTeardownClearsFlag(t *testing.T) {
 
 	t.Run("CloseWithMessage (no-restoreState branch)", func(t *testing.T) {
 		pr, pw, _ := os.Pipe()
-		defer pr.Close()
-		defer pw.Close()
+		defer func() { _ = pr.Close() }()
+		defer func() { _ = pw.Close() }()
 		var output bytes.Buffer
 		app := NewWithSize(4, 1, &output)
 		app.in = pr
