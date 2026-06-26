@@ -79,9 +79,9 @@ func isWide(r rune) bool {
 // wideRanges lists the inclusive code-point ranges of double-width glyphs, kept
 // sorted and non-overlapping for binary search.
 var wideRanges = [][2]rune{
-	{0x1100, 0x115F},   // Hangul Jamo
-	{0x231A, 0x231B},   // watch, hourglass
-	{0x2329, 0x232A},   // angle brackets
+	{0x1100, 0x115F}, // Hangul Jamo
+	{0x231A, 0x231B}, // watch, hourglass
+	{0x2329, 0x232A}, // angle brackets
 	// Emoji with default emoji (width-2) presentation scattered through the
 	// symbol blocks. Only Emoji_Presentation=Yes code points are listed; text-
 	// presentation symbols in the same blocks (e.g. ☢ U+2622, ✓ U+2713, arrows)
