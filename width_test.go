@@ -22,6 +22,17 @@ func TestRuneWidth(t *testing.T) {
 		{"fullwidth A", '！', 2},
 		{"emoji", '😀', 2},
 		{"rocket emoji", '🚀', 2},
+		// Issue #470: BMP emoji-presentation symbols that previously measured as
+		// width 1, leaving an uncleared continuation cell ("dirt") on scroll.
+		{"white heavy check mark", '✅', 2},
+		{"cross mark", '❌', 2},
+		{"sparkles", '✨', 2},
+		{"star", '⭐', 2},
+		{"high voltage", '⚡', 2},
+		{"colored circle", '🟢', 2},
+		// Text-presentation symbols in the same blocks must stay width 1.
+		{"text check (not emoji)", '✓', 1},
+		{"radioactive text symbol", '☢', 1},
 		{"combining acute", '́', 0},
 		{"zero width joiner", '‍', 0},
 		{"zero width space", '​', 0},
