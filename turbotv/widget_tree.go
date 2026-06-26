@@ -11,6 +11,14 @@ type TreeNode struct {
 	Children []*TreeNode
 	// Data is an optional payload for the caller (ignored by the widget).
 	Data interface{}
+	// HideMarker suppresses the leading ▸/▾ for a node that HAS children, painting
+	// a blank leading column instead while keeping the same indentation so labels
+	// stay aligned with sibling/leaf rows. It does not affect expand/collapse
+	// behaviour (Expanded and Children still drive flatten()), only the marker
+	// glyph. Default false ⇒ ▸/▾ as before; leaves render blank regardless. A host
+	// that hides the marker typically pairs this with Tree.OnToggle so the row can
+	// still be toggled by a body click.
+	HideMarker bool
 }
 
 // NewTreeNode creates a leaf node.
@@ -60,6 +68,20 @@ type Tree struct {
 	// selection. It never fires from keyboard navigation; when nil the widget
 	// behaves exactly as before.
 	OnSelectMouse func(*TreeNode)
+
+	// OnToggle, when set, is offered each committed row click BEFORE the default
+	// expand-marker logic. Returning true consumes the click as a toggle: the host
+	// has handled it (typically flipping node.Expanded and refreshing its label, e.g.
+	// a collapsible summary line whose suffix tracks the expansion state), so the
+	// widget skips its own marker-column toggle and the repeat-click OnActivate.
+	// Returning false lets the click fall through to the default behaviour. The hook
+	// is offered for every row click, not only marker-less nodes, so a handler that
+	// only wants to toggle certain rows must self-filter (e.g. on node.HideMarker or
+	// node.Data). It is additive: when nil the widget behaves exactly as before, and
+	// it is independent of HideMarker (one controls rendering, the other click
+	// toggling) though the two are designed to be paired. Keyboard Left/Right/Space
+	// keep toggling Expanded directly and do not invoke OnToggle.
+	OnToggle func(node *TreeNode, ev tui.ClickEvent) bool
 
 	// flatBuf is reused across flatten() calls so the visible-rows slice is not
 	// reallocated on every draw/click/scroll; it is recomputed (correctly) each
@@ -218,7 +240,9 @@ func (t *Tree) draw(component *VisualComponent, surface Surface) {
 		// not just under the glyphs.
 		surface.Fill(Rect{X: abs.X, Y: y, W: textW, H: 1}, tui.Cell{Ch: ' ', FG: fg, BG: bg})
 		marker := " "
-		if len(r.node.Children) > 0 {
+		// HideMarker leaves the leading column blank for a parent node while keeping
+		// the indentation, so the label stays aligned with leaf/sibling rows.
+		if len(r.node.Children) > 0 && !r.node.HideMarker {
 			if r.node.Expanded {
 				marker = "▾"
 			} else {
@@ -408,12 +432,16 @@ func (t *Tree) handleClick(component *VisualComponent, event tui.ClickEvent) boo
 	wasSelected := t.selected == idx
 	t.selected = idx
 	r := rows[idx]
+	// Host toggle hook: offered before the default marker-column logic so a host can
+	// toggle a marker-less node (or any node) from a row/body click. Returning true
+	// consumes the toggle — the host flips Expanded itself — suppressing the default
+	// marker toggle and the repeat-click activate below.
+	toggled := t.OnToggle != nil && t.OnToggle(r.node, event)
 	// Clicking on (or before) the expand marker toggles the node.
 	markerCol := abs.X + r.depth*2
-	toggledMarker := false
-	if len(r.node.Children) > 0 && event.X <= markerCol {
+	if !toggled && len(r.node.Children) > 0 && event.X <= markerCol {
 		r.node.Expanded = !r.node.Expanded
-		toggledMarker = true
+		toggled = true
 	}
 	// Capture the clicked node before OnSelect runs: a host's OnSelect may
 	// reentrantly move the selection (e.g. a focus snap-back via SelectNode), and
@@ -426,7 +454,7 @@ func (t *Tree) handleClick(component *VisualComponent, event tui.ClickEvent) boo
 	// A click on an already-selected row (not on its expand marker) also
 	// activates it, so callers can open/preview an item on a repeat click in
 	// addition to Enter.
-	if wasSelected && !toggledMarker && t.OnActivate != nil {
+	if wasSelected && !toggled && t.OnActivate != nil {
 		t.OnActivate(r.node)
 	}
 	return true
