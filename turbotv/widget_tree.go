@@ -432,14 +432,11 @@ func (t *Tree) handleClick(component *VisualComponent, event tui.ClickEvent) boo
 	wasSelected := t.selected == idx
 	t.selected = idx
 	r := rows[idx]
-	toggled := false
 	// Host toggle hook: offered before the default marker-column logic so a host can
 	// toggle a marker-less node (or any node) from a row/body click. Returning true
 	// consumes the toggle — the host flips Expanded itself — suppressing the default
 	// marker toggle and the repeat-click activate below.
-	if t.OnToggle != nil && t.OnToggle(r.node, event) {
-		toggled = true
-	}
+	toggled := t.OnToggle != nil && t.OnToggle(r.node, event)
 	// Clicking on (or before) the expand marker toggles the node.
 	markerCol := abs.X + r.depth*2
 	if !toggled && len(r.node.Children) > 0 && event.X <= markerCol {
