@@ -126,10 +126,27 @@ sorted, non-overlapping order so the binary search invariant holds. Concretely
 0x2B1B,0x2B1C      ⬛⬜
 0x2B50             ⭐
 0x2B55             ⭕
-0x1F1E6,0x1F1FF    regional indicators
 0x1F7E0,0x1F7EB    colored circles/squares
 0x1F7F0            heavy equals sign
 ```
+
+> **Insertion order matters.** The first new entry `{0x231A,0x231B}` must be
+> inserted *before* the existing `{0x2329,0x232A}` (it is lower), not appended.
+> `isWide` is a binary search over `wideRanges`; any out-of-order or overlapping
+> entry silently returns wrong widths (no panic) — reintroducing dirt, possibly
+> for glyphs that work today. A sorted/disjoint invariant test (below) is
+> mandatory to catch this.
+
+> **Explicitly excluded: regional indicators U+1F1E6–U+1F1FF.** These are *not*
+> `Emoji_Presentation=Yes` (they are `Regional_Indicator`), are not needed for
+> the reported `✅` bug, and widening them would *introduce* the same class of
+> bug. turbotui has no grapheme clustering (open question #2), so `StringWidth`
+> sums per-rune widths: a flag `"🇫🇷"` is two regional indicators. **Today** each
+> RI is width 1, so the flag measures 2 — which is exactly what the terminal
+> renders (one 2-cell flag glyph): *accidentally correct.* If RIs became width 2
+> the flag would measure 4 while the terminal still shows 2 → over-allocation,
+> misalignment and phantom gaps for every flag. They are deliberately left at
+> width 1.
 
 **Why the precise emoji-presentation set, not whole blocks.** I deliberately do
 *not* widen the entire `U+2600–U+27BF` / `U+2B00–U+2BFF` blocks. Many code
@@ -158,11 +175,16 @@ fix automatically. No changes there.
 
 ### `width_test.go`
 - Extend `TestRuneWidth` cases: `✅`(U+2705)==2, `⭐`(U+2B50)==2, `⌚`(U+231A)==2,
-  `❌`(U+274C)==2, plus a guard that a *text-presentation* symbol stays width 1
-  (`☢` U+2622==1, `✓` U+2713==1) to lock in the precise boundary and catch
-  accidental over-widening. Keep an existing CJK case (`世`==2) and combining
-  (==0)/ASCII(==1) cases.
-- `TestStringWidth`: add `"hello ✅"`==8.
+  `❌`(U+274C)==2, plus guards that lock in the precise boundary:
+  - text-presentation symbols stay width 1: `☢` U+2622==1, `✓` U+2713==1;
+  - **regional indicators stay width 1**: U+1F1EB==1 (so a 2-RI flag still
+    measures 2 — the anti-regression for the RI exclusion above).
+  Keep an existing CJK case (`世`==2) and combining(==0)/ASCII(==1) cases.
+- `TestStringWidth`: add `"hello ✅"`==8 and `"🇫🇷"`==2 (flag stays 2 cells).
+- **Mandatory invariant test** `TestWideRangesSortedDisjoint`: assert every
+  `wideRanges[i]` has `lo<=hi` and `wideRanges[i].hi < wideRanges[i+1].lo`. This
+  guards the `0x231A`-before-`0x2329` insertion and any future edit; a mis-sort
+  otherwise corrupts the binary search silently.
 
 ### Renderer/diff regression test (the actual repro)
 A focused test that reproduces frame A → scroll → frame B and asserts no stale
@@ -175,10 +197,14 @@ glyph remains in the continuation column:
    `✅`.
 3. Rewrite the frame so row `r` is now empty (the scrolled-in empty line);
    `Apply`; assert (a) the emitted bytes for that frame blank **both** columns
-   of the old `✅`, and (b) `ReadCell`/front grid show plain spaces (no residual
-   `cont` cell, no residual glyph) at both columns.
+   of the old `✅` — i.e. the cleared run reaches the *continuation* column, the
+   distinguishing fact (with the bug the run stops one column short: the empirically
+   observed 3-spaces-vs-4-spaces boundary), and (b) `ReadCell`/front grid show
+   plain spaces (no residual `cont` cell, no residual glyph) at both columns.
 4. Add a CJK twin of the same scenario with `世` to prove the assertion isn't
-   emoji-specific.
+   emoji-specific. (Pre-fix, the `✅` variant fails on assertion (a) — the run is
+   one column short — while the `世` variant passes; that contrast is the
+   regression guard.)
 
 These live in `width_test.go` (package `tui`), reusing the existing
 buffer-backed `App` test pattern.
@@ -203,12 +229,19 @@ modeled and repainted.
 
 **(3) No regressions.** ASCII/Latin/box-drawing widths are unchanged (still hit
 the width-1 fallback). CJK and the already-covered emoji blocks are unchanged.
-The only behavioral delta is for code points in the newly added ranges, all of
-which were *wrong* before. The precise-set approach specifically avoids
-regressing text-presentation symbols (`☢`, `✓`, arrows) that whole-block
-widening would have broken — and a new test pins that boundary. All existing
-tests continue to pass (they sample only already-correct glyphs). Verification:
-`go build ./...`, `go vet ./...`, `go test ./...` (root + `turbotv`).
+Every code point in the newly added ranges was width-1-but-should-be-2 before,
+so widening it is strictly corrective. Two boundaries are deliberately *not*
+crossed, and each is pinned by a test:
+- **text-presentation symbols** (`☢`, `✓`, arrows) stay width 1 — the
+  precise `Emoji_Presentation=Yes` set excludes them, where whole-block widening
+  would have broken them;
+- **regional indicators** (U+1F1E6–U+1F1FF) stay width 1 — because turbotui has
+  no grapheme clustering, a 2-RI flag *only* measures correctly (2 cells) while
+  RIs are width 1; widening them would mis-measure every flag. They are excluded
+  for exactly this reason (see the additions table).
+All existing tests continue to pass (they sample only already-correct glyphs).
+Verification: `go build ./...`, `go vet ./...`, `go test ./...` (root +
+`turbotv`).
 
 **(4) Holistic / cross-repo seam.** The fix lives entirely in turbotui, the
 correct repo: `RuneWidth`/`StringWidth` is turbotui's self-contained width
@@ -221,17 +254,34 @@ update after merge is just:
 `go get github.com/hobbestherat/turbotui@<sha> && go mod tidy`, plus updating
 any version pin-guard test. No gogent code change is required.
 
+The cross-repo effect is what makes the regional-indicator exclusion
+*mandatory*, not stylistic: gogent calls `tui.StringWidth` on arbitrary agent
+output in width-sensitive paths (markdown table-cell measurement and
+bullet-continuation padding in `markdown.go`, input dialogs in
+`input_dialog.go`, and the wrapped `turbotv` TextView transcript path). A flag
+emoji in agent output would mis-align in all of them if RIs were widened — i.e.
+the change would leak a new instance of the reported bug class into gogent. By
+restricting the additions to true emoji-presentation glyphs and leaving RIs at
+width 1, gogent's measurements stay in step with the terminal with zero gogent
+changes. No gogent test pins an emoji rune-width (confirmed: gogent's "wide"
+test hits are terminal-width, not rune-width), so nothing downstream breaks.
+
 ## Regression risks (and mitigations)
 
 - **Over-widening text-presentation symbols.** Mitigated by using the precise
   `Emoji_Presentation=Yes` ranges and adding an explicit "stays width 1" test
   for `☢`/`✓`.
+- **Regional-indicator flag regression (the critic's blocker).** Widening
+  U+1F1E6–U+1F1FF would make every flag emoji measure 4 instead of 2 (no
+  grapheme clustering), mis-aligning flags in both turbotui and gogent. Mitigated
+  by *excluding* RIs from the additions entirely and pinning U+1F1EB==1 and
+  `"🇫🇷"`==2 with tests.
 - **Sorted/non-overlap invariant of `wideRanges`.** New entries must be inserted
-  in order and not overlap neighbours, or `isWide`'s binary search breaks.
-  Mitigation: insert in the documented sorted position; the expanded
-  `TestRuneWidth` matrix (covering low/high ends of new ranges) catches a
-  mis-sort. (Optional belt-and-suspenders: a test asserting `wideRanges` is
-  sorted and disjoint.)
+  in order and not overlap neighbours, or `isWide`'s binary search silently
+  returns wrong widths (no panic). In particular `{0x231A,0x231B}` sorts *before*
+  the existing `{0x2329,0x232A}`. Mitigated by the **mandatory**
+  `TestWideRangesSortedDisjoint` invariant test (not optional) plus the expanded
+  `TestRuneWidth` matrix covering low/high ends of new ranges.
 - **Right-edge wide glyph.** Already handled by `place` (`app.go:436`) and
   `TestWideGlyphAtRightEdgeRendersBlank`; now that more glyphs are width 2,
   that path simply applies to them too — no new logic.
@@ -242,10 +292,14 @@ any version pin-guard test. No gogent code change is required.
    maintainer prefers the most conservative possible change, the alternative is
    `{0x2705,0x2705}` alone — but that leaves `⭐`, `⌚`, `❌`, `🟠` broken. Confirm
    the broader (correct) scope is acceptable.
-2. **ZWJ / multi-rune emoji sequences** (e.g. 👍🏽, family emoji). These render
-   width 2 in most terminals but turbotui measures per-rune and has no grapheme
-   clustering; this is a pre-existing limitation, out of scope for #470, and not
-   the reported symptom. Flagging only — no change proposed unless requested.
+2. **ZWJ / multi-rune emoji sequences and flags** (e.g. 👍🏽, family emoji, 🇫🇷).
+   These render as a single width-2 cluster in most terminals, but turbotui
+   measures per-rune with no grapheme clustering. For flags this happens to
+   measure correctly today *only because* regional indicators are width 1 (2×1=2)
+   — which is precisely why this change must leave them at width 1 (see criterion
+   3). Real grapheme clustering is a larger pre-existing limitation, out of scope
+   for #470, and not the reported symptom. Flagging only — no change proposed
+   unless requested.
 3. **Variation selector U+FE0F.** It is already treated as zero-width
    (`isZeroWidth`), so `2705 FE0F` measures 2 (base) + 0 = 2, which is correct.
    No change needed; noted for completeness.
