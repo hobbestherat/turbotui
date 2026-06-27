@@ -26,9 +26,18 @@ func NewButtonRow(rowY int, interiorW int, align Align, gap int, buttons ...*But
 		gap = 0
 	}
 	total := 0
+	rowH := 1
 	for index, button := range buttons {
 		width := buttonLabelWidth(button.Label)
-		button.Component.SetBounds(Rect{W: width, H: 1})
+		// Height comes from the button's own bounds; default to 1 when unset so
+		// every existing caller (which passes a zero Rect) keeps a 1-row footer.
+		// The HBox is AlignStretch, so the row's height — the tallest button —
+		// becomes every button's height (a uniform-height footer).
+		height := ButtonHeight(button.Component.Bounds)
+		button.Component.SetBounds(Rect{W: width, H: height})
+		if height > rowH {
+			rowH = height
+		}
 		if index > 0 {
 			total += gap
 		}
@@ -48,7 +57,7 @@ func NewButtonRow(rowY int, interiorW int, align Align, gap int, buttons ...*But
 	if boxW > interiorW {
 		boxW = interiorW
 	}
-	box := NewHBox(Rect{X: boxX, Y: rowY, W: boxW, H: 1})
+	box := NewHBox(Rect{X: boxX, Y: rowY, W: boxW, H: rowH})
 	box.Spacing = gap
 	for _, button := range buttons {
 		box.Add(button)

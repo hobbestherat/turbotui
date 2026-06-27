@@ -75,18 +75,37 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	// The shadow sits outside the button bounds, so it must draw through the
 	// parent's clip (the component opts out via DrawOutside). The face and label
 	// do NOT: draw them through a face-bounds-clipped surface so a caption longer
-	// than the button can never bleed into neighbouring widgets.
+	// than the button can never bleed into neighbouring widgets. The shadow keys
+	// off abs.Right()/abs.Bottom(), so it hugs the bottom edge at any face height.
 	if b.Shadow && !b.Pressed {
 		surface.DrawShadow(abs, b.ShadowColor, b.ShadowStyle)
 	}
 	fg, bg := focusColors(component.Focused(), b.FG, b.BG, b.FocusFG, b.FocusBG)
 	style := tui.Cell{FG: fg, BG: bg, Bold: true}
 	faceSurface := surface.WithClip(face)
+	// Fill paints every row of the face, so a tall button reads as a solid block.
 	faceSurface.Fill(face, style)
 
 	clean, _ := parseMnemonic(b.Label)
-	// Focused buttons are wrapped in chevrons so keyboard focus is obvious.
-	left, right := "[ ", " ]"
+	// Height comes purely from bounds: brackets and the box face run the full
+	// height for visual weight (a solid "[ … ]" block), while the caption and the
+	// focus chevrons sit on the single vertically-centred row. centerY rounds down
+	// on even heights (H=2 -> the lower of the two rows). At H==1 the centre row is
+	// the only row, so this renders identically to a one-row button (gogent#529).
+	centerY := face.Y + face.H/2
+
+	// Box brackets frame every row; they stay plain even when focused so the box
+	// outline reads continuously and only the caption row carries the chevrons.
+	boxLeft, boxRight := "[ ", " ]"
+	boxRightW := tui.StringWidth(boxRight)
+	boxRightX := face.X + face.W - boxRightW
+	if boxRightX < face.X {
+		boxRightX = face.X
+	}
+
+	// Caption-row chrome: focused buttons swap the brackets for chevrons so
+	// keyboard focus is obvious.
+	left, right := boxLeft, boxRight
 	if component.Focused() {
 		left, right = "►", "◄"
 	}
@@ -114,9 +133,19 @@ func (b *Button) draw(component *VisualComponent, surface Surface) {
 	if rightX < face.X {
 		rightX = face.X // face narrower than the right bracket: clamp, never go left of the face
 	}
-	faceSurface.WriteString(face.X, face.Y, left, style)
-	drawMnemonicClipped(faceSurface, captionStart, face.Y, b.Label, avail, style, component.mnemonicActive, activeTheme.MnemonicFG)
-	faceSurface.WriteString(rightX, face.Y, right, style)
+	for y := face.Y; y <= face.Bottom(); y++ {
+		if y == centerY {
+			// The centred row carries the caption between the (possibly chevron)
+			// brackets.
+			faceSurface.WriteString(face.X, y, left, style)
+			drawMnemonicClipped(faceSurface, captionStart, y, b.Label, avail, style, component.mnemonicActive, activeTheme.MnemonicFG)
+			faceSurface.WriteString(rightX, y, right, style)
+			continue
+		}
+		// Every other row draws only the plain box brackets at the face edges.
+		faceSurface.WriteString(face.X, y, boxLeft, style)
+		faceSurface.WriteString(boxRightX, y, boxRight, style)
+	}
 }
 
 func (b *Button) press() bool {
