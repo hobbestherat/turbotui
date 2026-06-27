@@ -21,14 +21,19 @@ const (
 
 type MultiLineInput struct {
 	Component *VisualComponent
-	Lines     []string
-	CursorX   int
-	CursorY   int
-	ScrollY   int
-	FG        tui.Color
-	BG        tui.Color
-	FocusFG   tui.Color
-	FocusBG   tui.Color
+	// Lines holds the logical lines of the buffer. NOTE: a line may contain an opaque
+	// paste-chip sentinel rune (see paste_chip.go) standing in for a collapsed
+	// multi-line paste — use GetText() for the verbatim text and IsPasteChipRune to
+	// detect a chip when scanning Lines directly. CursorX is a rune offset into the
+	// current line, so a chip (one rune) is one caret stop.
+	Lines   []string
+	CursorX int
+	CursorY int
+	ScrollY int
+	FG      tui.Color
+	BG      tui.Color
+	FocusFG tui.Color
+	FocusBG tui.Color
 	// WordWrap, when true, breaks long logical lines on whitespace so words are
 	// kept intact instead of being split mid-word at the right edge. The default
 	// (false) keeps the original character-level wrapping, which suits code.
@@ -49,6 +54,9 @@ type MultiLineInput struct {
 	// typed character to be treated as selected and overwritten).
 	pressLine   int
 	pressCursor int
+	// chips holds the verbatim original text of every collapsed multi-line paste,
+	// keyed by the sentinel rune that stands for it in Lines.
+	chips chipStore
 }
 
 type wrappedLineRow struct {
@@ -97,11 +105,23 @@ func (m *MultiLineInput) Root() *VisualComponent {
 	return m.Component
 }
 
+// GetText returns the verbatim buffer text: each line's runes with any paste-chip
+// sentinel expanded back to its full original (newlines restored), joined with '\n'.
+// A chip-free buffer produces exactly the join of Lines.
 func (m *MultiLineInput) GetText() string {
-	return strings.Join(m.Lines, "\n")
+	parts := make([]string, len(m.Lines))
+	for i, line := range m.Lines {
+		parts[i] = m.chips.expand([]rune(line))
+	}
+	return strings.Join(parts, "\n")
 }
 
+// SetText replaces the buffer with text LITERALLY: newlines split into real, editable
+// lines exactly as before. It deliberately does NOT collapse multi-line text into a
+// chip — history recall of a hand-typed multi-line prompt must stay editable. Use
+// SetTextChip to restore a remembered paste AS a chip. Any prior chips are dropped.
 func (m *MultiLineInput) SetText(text string) {
+	m.chips.reset()
 	m.Lines = strings.Split(text, "\n")
 	if len(m.Lines) == 0 {
 		m.Lines = []string{""}
@@ -112,8 +132,45 @@ func (m *MultiLineInput) SetText(text string) {
 	m.selAnchorY = -1
 }
 
+// SetTextChip restores text as a single atomic paste chip when it contains a newline
+// (so a host can recall a remembered paste as the compact "[pasted N lines]" token
+// rather than spilling N editable lines); a newline-free value is set literally via
+// SetText. This is the explicit, intent-revealing counterpart to handlePaste — the
+// plain SetText never chip-ifies, so it is safe for ordinary recall.
+func (m *MultiLineInput) SetTextChip(text string) {
+	if !strings.Contains(text, "\n") {
+		m.SetText(text)
+		return
+	}
+	m.chips.reset()
+	r := m.chips.add(text)
+	m.Lines = []string{string(r)}
+	m.CursorY = 0
+	m.CursorX = 1
+	m.ScrollY = 0
+	m.selAnchorY = -1
+}
+
 func (m *MultiLineInput) Clear() {
 	m.SetText("")
+}
+
+// pruneChips drops chip-store entries whose sentinel rune is no longer present in the
+// buffer, called after edits that may have removed a chip so the store cannot grow
+// without bound across paste→delete cycles.
+func (m *MultiLineInput) pruneChips() {
+	if len(m.chips.byRune) == 0 {
+		return
+	}
+	present := make(map[rune]bool)
+	for _, line := range m.Lines {
+		for _, r := range line {
+			if IsPasteChipRune(r) {
+				present[r] = true
+			}
+		}
+	}
+	m.chips.keepOnly(present)
 }
 
 func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
@@ -136,26 +193,52 @@ func (m *MultiLineInput) draw(component *VisualComponent, surface Surface) {
 			continue
 		}
 		wrapped := rows[rowIndex]
-		for col := 0; col < textWidth && col < len(wrapped.runes); col++ {
+		// Walk the row's runes tracking the display column, since a chip occupies more
+		// than one column. Ordinary runes paint one cell (col == rune index, as before);
+		// a chip paints its themed label across its display width.
+		dx := 0
+		for i := 0; i < len(wrapped.runes) && dx < textWidth; i++ {
+			r := wrapped.runes[i]
+			selected := m.isSelected(wrapped.line, wrapped.start+i)
+			if IsPasteChipRune(r) {
+				label := []rune{r}
+				if text, ok := m.chips.text(r); ok {
+					label = chipLabelFit(text, textWidth)
+				}
+				cfg, cbg := activeTheme.PasteChipFG, activeTheme.PasteChipBG
+				if selected {
+					cfg, cbg = activeTheme.TextSelectionFG, activeTheme.TextSelectionBG
+				}
+				for _, lr := range label {
+					if dx >= textWidth {
+						break
+					}
+					surface.SetCell(abs.X+dx, abs.Y+row, tui.Cell{Ch: lr, FG: cfg, BG: cbg})
+					dx++
+				}
+				continue
+			}
 			cell := style
-			cell.Ch = wrapped.runes[col]
-			if m.isSelected(wrapped.line, wrapped.start+col) {
+			cell.Ch = r
+			if selected {
 				cell.FG = activeTheme.TextSelectionFG
 				cell.BG = activeTheme.TextSelectionBG
 			}
-			surface.SetCell(abs.X+col, abs.Y+row, cell)
+			surface.SetCell(abs.X+dx, abs.Y+row, cell)
+			dx++
 		}
 		// Fill the blank tail of a selected, spanned line so a block selection runs
-		// to the right edge instead of stopping at each line's last character.
-		for col := len(wrapped.runes); col < textWidth; col++ {
-			if !m.isSelected(wrapped.line, wrapped.start+col) {
-				continue
+		// to the right edge instead of stopping at each line's last character. The
+		// membership is uniform past the row's content, so test the position just after
+		// the last rune once and fill the remaining display columns.
+		if m.isSelected(wrapped.line, wrapped.start+len(wrapped.runes)) {
+			for ; dx < textWidth; dx++ {
+				surface.SetCell(abs.X+dx, abs.Y+row, tui.Cell{
+					Ch: ' ',
+					FG: activeTheme.TextSelectionFG,
+					BG: activeTheme.TextSelectionBG,
+				})
 			}
-			surface.SetCell(abs.X+col, abs.Y+row, tui.Cell{
-				Ch: ' ',
-				FG: activeTheme.TextSelectionFG,
-				BG: activeTheme.TextSelectionBG,
-			})
 		}
 	}
 	// Only show the scrollbar when there is overflow; the reserved column is
@@ -259,6 +342,11 @@ func (m *MultiLineInput) handleType(_ *VisualComponent, event tui.TypeEvent) boo
 	if event.Key != tui.KeyRune || event.Ctrl {
 		return false
 	}
+	// Never let a paste-chip sentinel enter the buffer via a keystroke (it could only
+	// arrive as a spoofed event); the marker range is reserved for collapsed pastes.
+	if IsPasteChipRune(event.Rune) {
+		return true
+	}
 	m.deleteSelection()
 	m.insertRune(event.Rune)
 	return true
@@ -309,6 +397,9 @@ func (m *MultiLineInput) isSelected(line int, col int) bool {
 	return true
 }
 
+// selectionText returns the selected text with any paste-chip sentinel expanded to its
+// full original (so copy/cut of a selection touching a chip yields the verbatim
+// multi-line content, never the visible label).
 func (m *MultiLineInput) selectionText() string {
 	if !m.hasSelection() {
 		return ""
@@ -317,20 +408,20 @@ func (m *MultiLineInput) selectionText() string {
 	if y0 == y1 {
 		runes := []rune(m.Lines[y0])
 		x0, x1 = clampRange(len(runes), x0, x1)
-		return string(runes[x0:x1])
+		return m.chips.expand(runes[x0:x1])
 	}
 	var builder strings.Builder
 	first := []rune(m.Lines[y0])
 	x0 = clampCol(len(first), x0)
-	builder.WriteString(string(first[x0:]))
+	builder.WriteString(m.chips.expand(first[x0:]))
 	builder.WriteByte('\n')
 	for line := y0 + 1; line < y1; line++ {
-		builder.WriteString(m.Lines[line])
+		builder.WriteString(m.chips.expand([]rune(m.Lines[line])))
 		builder.WriteByte('\n')
 	}
 	last := []rune(m.Lines[y1])
 	x1 = clampCol(len(last), x1)
-	builder.WriteString(string(last[:x1]))
+	builder.WriteString(m.chips.expand(last[:x1]))
 	return builder.String()
 }
 
@@ -353,6 +444,7 @@ func (m *MultiLineInput) deleteSelection() bool {
 	m.CursorY = y0
 	m.CursorX = x0
 	m.selAnchorY = -1
+	m.pruneChips()
 	return true
 }
 
@@ -381,8 +473,11 @@ func clampRange(length, x0, x1 int) (int, int) {
 func (m *MultiLineInput) forwardDelete() {
 	line := []rune(m.Lines[m.CursorY])
 	if m.CursorX < len(line) {
+		// Forward-delete removes one rune; a chip is one rune, so a Delete with the
+		// caret immediately before a chip removes the whole pasted block.
 		line = append(line[:m.CursorX], line[m.CursorX+1:]...)
 		m.Lines[m.CursorY] = string(line)
+		m.pruneChips()
 		return
 	}
 	if m.CursorY >= len(m.Lines)-1 {
@@ -421,32 +516,34 @@ func (m *MultiLineInput) insertRune(value rune) {
 	m.CursorX++
 }
 
-// handlePaste inserts pasted text at the cursor, replacing any selection and
-// splitting on newlines so a multi-line paste spans multiple lines. CR is
-// dropped so CRLF pastes behave.
+// handlePaste inserts pasted text at the cursor, replacing any selection. A paste
+// CONTAINING a newline is collapsed into a single atomic "[pasted N lines]" chip (one
+// sentinel rune holding the verbatim original) instead of spilling N editable lines; a
+// newline-free paste is inserted literally rune-by-rune as before. CR is dropped
+// (CRLF→LF) and other control runes are stripped on ingest, so GetText after a chip
+// paste equals what a literal multi-line insert would have produced.
 func (m *MultiLineInput) handlePaste(_ *VisualComponent, text string) bool {
 	m.deleteSelection()
-	for _, r := range text {
-		switch {
-		case r == '\r':
-			continue
-		case r == '\n':
-			m.newLine()
-		case r < 0x20:
-			continue
-		default:
-			m.insertRune(r)
-		}
+	clean, hasNewline := sanitizePaste(text)
+	if hasNewline {
+		m.insertRune(m.chips.add(clean))
+		return true
+	}
+	for _, r := range clean {
+		m.insertRune(r)
 	}
 	return true
 }
 
 func (m *MultiLineInput) backspace() {
 	if m.CursorX > 0 {
+		// Backspace removes one rune; a chip is one rune, so a Backspace with the
+		// caret immediately after a chip removes the whole pasted block.
 		line := []rune(m.Lines[m.CursorY])
 		line = append(line[:m.CursorX-1], line[m.CursorX:]...)
 		m.Lines[m.CursorY] = string(line)
 		m.CursorX--
+		m.pruneChips()
 		return
 	}
 	if m.CursorY <= 0 {
@@ -504,7 +601,7 @@ func (m *MultiLineInput) moveUp(width int) {
 	if cursorRow <= 0 {
 		return
 	}
-	line, column := m.visualPosToCursorFromRows(rows, cursorRow-1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow-1, cursorCol, width)
 	m.CursorY = line
 	m.CursorX = column
 }
@@ -515,7 +612,7 @@ func (m *MultiLineInput) moveDown(width int) {
 	if cursorRow >= len(rows)-1 {
 		return
 	}
-	line, column := m.visualPosToCursorFromRows(rows, cursorRow+1, cursorCol)
+	line, column := m.visualPosToCursorFromRows(rows, cursorRow+1, cursorCol, width)
 	m.CursorY = line
 	m.CursorX = column
 }
@@ -571,12 +668,20 @@ func (m *MultiLineInput) wrappedRows(width int) []wrappedLineRow {
 // that become its visual rows at the given width, honouring WordWrap. Both modes
 // preserve every rune (the spans tile the line with no gaps), so a span's start
 // remains a valid selection/cursor offset. An empty line yields one empty span.
+//
+// A line with no paste chip takes the original char-/word-wrap path unchanged (every
+// rune is one display column). A line containing a chip routes through chipAwareSpans,
+// which measures display width per cell so a multi-column chip wraps as one unbreakable
+// token without splitting.
 func (m *MultiLineInput) lineSpans(runes []rune, width int) []runeSpan {
 	if width < 1 {
 		width = 1
 	}
 	if len(runes) == 0 {
 		return []runeSpan{{start: 0, end: 0}}
+	}
+	if lineHasChip(runes) {
+		return m.chipAwareSpans(runes, width)
 	}
 	if m.WordWrap {
 		return wordWrapSpans(runes, width)
@@ -588,6 +693,84 @@ func (m *MultiLineInput) lineSpans(runes []rune, width int) []runeSpan {
 			end = len(runes)
 		}
 		spans = append(spans, runeSpan{start: start, end: end})
+	}
+	return spans
+}
+
+// lineHasChip reports whether a line contains any paste-chip sentinel rune.
+func lineHasChip(runes []rune) bool {
+	for _, r := range runes {
+		if IsPasteChipRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// cellWidth is the display width (columns) of one rune in this line: 1 for ordinary
+// runes (the widget lays text out one column per rune, as it always has) and the
+// width-fitted label width for a chip sentinel. An orphan sentinel with no store entry
+// counts as one column.
+func (m *MultiLineInput) cellWidth(r rune, width int) int {
+	if !IsPasteChipRune(r) {
+		return 1
+	}
+	if text, ok := m.chips.text(r); ok {
+		if w := tui.StringWidth(string(chipLabelFit(text, width))); w >= 1 {
+			return w
+		}
+	}
+	return 1
+}
+
+// runeColWidth sums the display widths of runes[from:to], i.e. the column offset of
+// rune index `to` within its visual row that starts at `from`. For a chip-free range
+// this is just to-from.
+func (m *MultiLineInput) runeColWidth(runes []rune, from, to, width int) int {
+	if to > len(runes) {
+		to = len(runes)
+	}
+	col := 0
+	for k := from; k < to; k++ {
+		col += m.cellWidth(runes[k], width)
+	}
+	return col
+}
+
+// chipAwareSpans wraps a line whose cells have varying display width, packing runes
+// into rows no wider than `width` display columns and never splitting a chip. In
+// WordWrap mode it prefers to break just after the last whitespace in the row, matching
+// the chip-free word-wrap behaviour. A single cell wider than the row still consumes
+// its own row (the chip label is truncated to fit at draw time).
+func (m *MultiLineInput) chipAwareSpans(runes []rune, width int) []runeSpan {
+	n := len(runes)
+	spans := make([]runeSpan, 0, n)
+	start := 0
+	for start < n {
+		colW, end := 0, start
+		for end < n {
+			w := m.cellWidth(runes[end], width)
+			if end > start && colW+w > width {
+				break
+			}
+			colW += w
+			end++
+		}
+		if end == start {
+			end = start + 1
+		}
+		if m.WordWrap && end < n {
+			breakAt := end
+			for i := end - 1; i > start; i-- {
+				if runes[i] == ' ' || runes[i] == '\t' {
+					breakAt = i + 1
+					break
+				}
+			}
+			end = breakAt
+		}
+		spans = append(spans, runeSpan{start: start, end: end})
+		start = end
 	}
 	return spans
 }
@@ -658,10 +841,13 @@ func (m *MultiLineInput) rowsForLine(line string, width int) int {
 	if width < 1 {
 		width = 1
 	}
-	if m.WordWrap {
-		return len(m.lineSpans([]rune(line), width))
+	runes := []rune(line)
+	// Word wrap and any line carrying a chip need the real (display-width-aware) span
+	// layout; plain char-wrapped text keeps the O(1) arithmetic.
+	if m.WordWrap || lineHasChip(runes) {
+		return len(m.lineSpans(runes, width))
 	}
-	length := len([]rune(line))
+	length := len(runes)
 	if length == 0 {
 		return 1
 	}
@@ -673,18 +859,22 @@ func (m *MultiLineInput) rowsForLine(line string, width int) int {
 }
 
 // caretSpanOffsetCol locates the caret within its logical line as a (visual-row
-// offset, column) pair using the actual wrap spans. It is the word-wrap analogue
-// of the character arithmetic in cursorVisualPos/cursorRowCol; both callers route
-// through it when WordWrap is on so they stay in agreement.
+// offset, display column) pair using the actual wrap spans. The column is the summed
+// display width of the runes before the caret on its row, so a chip earlier on the row
+// contributes its full label width. For a chip-free row this reduces to cursorX minus
+// the row start. It is the analogue of the character arithmetic in
+// cursorVisualPos/cursorRowCol; callers route through it for word wrap and for any line
+// containing a chip so they stay in agreement.
 func (m *MultiLineInput) caretSpanOffsetCol(lineIndex, cursorX, width int) (int, int) {
-	spans := m.lineSpans([]rune(m.Lines[lineIndex]), width)
+	runes := []rune(m.Lines[lineIndex])
+	spans := m.lineSpans(runes, width)
 	for i, span := range spans {
 		if cursorX < span.end {
-			return i, cursorX - span.start
+			return i, m.runeColWidth(runes, span.start, cursorX, width)
 		}
 	}
 	last := len(spans) - 1
-	return last, cursorX - spans[last].start
+	return last, m.runeColWidth(runes, spans[last].start, cursorX, width)
 }
 
 // CaretRowInLine reports the caret's visual-row offset within its own logical
@@ -721,7 +911,7 @@ func (m *MultiLineInput) CaretRowInLine() (rowInLine int, rowsInLine int) {
 	if n := len([]rune(m.Lines[y])); x > n {
 		x = n
 	}
-	if m.WordWrap {
+	if m.WordWrap || lineHasChip([]rune(m.Lines[y])) {
 		rowInLine, _ = m.caretSpanOffsetCol(y, x, width)
 	} else {
 		rowInLine = x / width
@@ -759,7 +949,7 @@ func (m *MultiLineInput) cursorVisualPos(width int) (int, int) {
 	for index := 0; index < m.CursorY; index++ {
 		row += m.rowsForLine(m.Lines[index], width)
 	}
-	if m.WordWrap {
+	if m.WordWrap || lineHasChip(lineRunes) {
 		offset, col := m.caretSpanOffsetCol(m.CursorY, m.CursorX, width)
 		return row + offset, col
 	}
@@ -807,7 +997,7 @@ func (m *MultiLineInput) cursorRowCol(rows []wrappedLineRow, width int) (int, in
 			row++
 		}
 	}
-	if m.WordWrap {
+	if m.WordWrap || lineHasChip(lineRunes) {
 		offset, col := m.caretSpanOffsetCol(m.CursorY, m.CursorX, width)
 		return row + offset, col
 	}
@@ -824,10 +1014,14 @@ func (m *MultiLineInput) cursorRowCol(rows []wrappedLineRow, width int) (int, in
 	return row, col
 }
 
-// visualPosToCursorFromRows maps a (visual row, column) back to a (line, cursor)
-// using an already-wrapped layout. It is the allocation-free form of the old
-// visualPosToCursor, which re-wrapped the whole buffer on every call.
-func (m *MultiLineInput) visualPosToCursorFromRows(rows []wrappedLineRow, row int, col int) (int, int) {
+// visualPosToCursorFromRows maps a (visual row, display column) back to a (line,
+// cursor) using an already-wrapped layout. It is the allocation-free form of the old
+// visualPosToCursor, which re-wrapped the whole buffer on every call. The column is a
+// display column (chip-aware): a click that lands within a chip snaps to the chip's
+// near edge — the caret is placed before the chip for the left half, after it for the
+// right half, and can never be placed inside it. For a chip-free row this reduces to
+// cursor = start + col exactly as before.
+func (m *MultiLineInput) visualPosToCursorFromRows(rows []wrappedLineRow, row, col, width int) (int, int) {
 	if len(rows) == 0 {
 		return 0, 0
 	}
@@ -840,7 +1034,27 @@ func (m *MultiLineInput) visualPosToCursorFromRows(rows []wrappedLineRow, row in
 	target := rows[row]
 	line := target.line
 	lineRunes := []rune(m.Lines[line])
+	acc := 0
+	for i := 0; i < len(target.runes); i++ {
+		w := m.cellWidth(target.runes[i], width)
+		if col < acc+w {
+			cursor := target.start + i
+			if IsPasteChipRune(target.runes[i]) && col >= acc+(w+1)/2 {
+				cursor++
+			}
+			return line, cursor
+		}
+		acc += w
+	}
+	// Past the row's last cell. For a chip-free row, start+col reproduces the historical
+	// behaviour exactly (clamped to the line). For a chip row, display columns and rune
+	// offsets diverge, so clamp to the row's end instead of overshooting.
 	cursor := target.start + col
+	if lineHasChip(target.runes) {
+		if max := target.start + len(target.runes); cursor > max {
+			cursor = max
+		}
+	}
 	if cursor > len(lineRunes) {
 		cursor = len(lineRunes)
 	}
@@ -887,7 +1101,7 @@ func (m *MultiLineInput) handleClick(component *VisualComponent, event tui.Click
 	if row < 0 {
 		row = 0
 	}
-	line, cursor := m.visualPosToCursorFromRows(rows, row, col)
+	line, cursor := m.visualPosToCursorFromRows(rows, row, col, textWidth)
 	if !m.selecting {
 		if !abs.Contains(event.X, event.Y) {
 			return false

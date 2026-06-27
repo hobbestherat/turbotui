@@ -30,11 +30,18 @@ func TestTextBoxEnterBubblesWithoutSubmit(t *testing.T) {
 	}
 }
 
-func TestTextBoxPasteStripsNewlines(t *testing.T) {
+// TestTextBoxPasteCollapsesToChip replaces the former TestTextBoxPasteStripsNewlines:
+// as of gogent #501 a multi-line paste into the single-line TextBox collapses to one
+// atomic chip (parity with MultiLineInput) instead of stripping the newlines, and
+// GetText restores the verbatim original with CR dropped (CRLF→LF).
+func TestTextBoxPasteCollapsesToChip(t *testing.T) {
 	box := NewTextBox("", Rect{X: 0, Y: 0, W: 40, H: 1})
 	box.handlePaste(box.Component, "ab\ncd\r\nef")
-	if string(box.Text) != "abcdef" {
-		t.Fatalf("expected newlines stripped, got %q", string(box.Text))
+	if len(box.Text) != 1 || !IsPasteChipRune(box.Text[0]) {
+		t.Fatalf("expected a single chip sentinel, got %q", string(box.Text))
+	}
+	if got := box.GetText(); got != "ab\ncd\nef" {
+		t.Fatalf("expected GetText to restore the verbatim paste, got %q", got)
 	}
 }
 

@@ -76,14 +76,21 @@ func TestMultiLineInputSubmitModeShiftEnter(t *testing.T) {
 	}
 }
 
-func TestMultiLineInputPasteSplitsLines(t *testing.T) {
+// TestMultiLineInputPasteCollapsesToChip replaces the former
+// TestMultiLineInputPasteSplitsLines: as of gogent #501 a multi-line paste is
+// collapsed into a single atomic chip (the box no longer grows to N lines) while
+// GetText restores the verbatim original with CR dropped (CRLF→LF).
+func TestMultiLineInputPasteCollapsesToChip(t *testing.T) {
 	input := NewMultiLineInput("", Rect{X: 0, Y: 0, W: 40, H: 5})
 	input.handlePaste(input.Component, "one\r\ntwo\nthree")
-	if len(input.Lines) != 3 {
-		t.Fatalf("expected 3 lines after paste, got %d: %#v", len(input.Lines), input.Lines)
+	if len(input.Lines) != 1 {
+		t.Fatalf("expected paste to collapse to a single line, got %d: %#v", len(input.Lines), input.Lines)
 	}
-	if input.Lines[0] != "one" || input.Lines[1] != "two" || input.Lines[2] != "three" {
-		t.Fatalf("unexpected pasted lines: %#v", input.Lines)
+	if got := []rune(input.Lines[0]); len(got) != 1 || !IsPasteChipRune(got[0]) {
+		t.Fatalf("expected the line to be one chip sentinel, got %#v", input.Lines)
+	}
+	if got := input.GetText(); got != "one\ntwo\nthree" {
+		t.Fatalf("expected GetText to restore the verbatim paste, got %q", got)
 	}
 }
 
