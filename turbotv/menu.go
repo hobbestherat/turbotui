@@ -44,6 +44,12 @@ type MenuItem struct {
 	Checkable bool
 	Checked   bool
 	OnToggle  func(checked bool)
+
+	// RightAligned packs this top-level menu from the right edge inward (to the left
+	// of the status slot) instead of left-packing it (issue #500). It only affects a
+	// top-level menu (an entry of MenuBar.Menus); it is ignored on child items. The
+	// zero value is false, so a menu is left-packed exactly as before unless opted in.
+	RightAligned bool
 }
 
 func NewMenuItem(label string, onSelect func()) *MenuItem {
@@ -122,6 +128,16 @@ func (m *MenuItem) WithActionID(id ActionID) *MenuItem {
 	return m
 }
 
+// AlignRight marks a top-level menu to be packed from the right edge inward, to the
+// left of the menu bar's status slot (issue #500), instead of left-packed with the
+// rest. It is the fluent form of setting RightAligned and is additive: an item that
+// is never marked stays left-packed exactly as before. It has no effect on a child
+// (submenu) item.
+func (m *MenuItem) AlignRight() *MenuItem {
+	m.RightAligned = true
+	return m
+}
+
 // Chord returns the key combination this shortcut's fields describe, decoupled from
 // its Display string. It bridges the MenuShortcut representation to the first-class
 // Chord used by the BindingRegistry, so an application can derive the Chord a menu
@@ -149,10 +165,26 @@ type MenuBar struct {
 	ShadowCol tui.Color
 	ShadowSty ShadowStyle
 
+	// StatusText is a right-anchored status label drawn flush-right within the bar
+	// (issue #500). The empty string (the default) draws nothing, so a bar that never
+	// sets it renders exactly as before. It is measured by display width (so glyphs
+	// like ●/○/◐ and any wide rune size correctly) and rendered literally — it is NOT
+	// '&'-mnemonic-parsed and shows no hot-key underline. Update it with SetStatus.
+	StatusText string
+	// StatusFG/StatusBG colour the whole status string; a zero value falls back to the
+	// bar's FG/BG. There is no per-glyph colouring in v1 — the single pair applies to
+	// the entire string.
+	StatusFG tui.Color
+	StatusBG tui.Color
+
 	openPath     []int
 	hoverPath    []int
 	topRects     []Rect
 	popupLayouts []menuPopupLayout
+	// statusSlotW is the clamped width (status text + 1 pad cell) reserved at the right
+	// edge for StatusText, computed once in layoutTopRects and read back by draw so the
+	// reserved slot and the painted text can never drift. It is 0 when no status shows.
+	statusSlotW int
 }
 
 type menuPopupLayout struct {
@@ -194,6 +226,25 @@ func (m *MenuBar) Root() *VisualComponent {
 	return m.Component
 }
 
+// SetStatus updates the right-anchored status text (issue #500). Like the other
+// MenuBar/widget mutators (SetVisible/SetEnabled/…) it is a pure state change and does
+// NOT repaint by itself: call it on the event-loop goroutine and pair it with a redraw,
+// i.e. from a background goroutine use Desktop.Post(func(){ bar.SetStatus(...) }) (Post
+// requests the coalesced redraw), or follow it with Desktop.Redraw(). The empty string
+// clears the slot.
+func (m *MenuBar) SetStatus(text string) {
+	m.StatusText = text
+}
+
+// SetStatusColors overrides the colours of the status text. A zero Color falls back to
+// the bar's FG/BG, so SetStatusColors(tui.Color{}, tui.Color{}) restores the defaults.
+// The pair applies to the whole status string (no per-glyph colouring in v1). Same
+// threading/redraw contract as SetStatus.
+func (m *MenuBar) SetStatusColors(fg tui.Color, bg tui.Color) {
+	m.StatusFG = fg
+	m.StatusBG = bg
+}
+
 func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 	abs := component.AbsoluteBounds()
 	surface.Fill(abs, tui.Cell{Ch: ' ', FG: m.FG, BG: m.BG})
@@ -213,6 +264,27 @@ func (m *MenuBar) draw(component *VisualComponent, surface Surface) {
 			style.FG = tui.ANSIColor(8)
 		}
 		drawMnemonic(surface, rect.X+1, rect.Y, item.Label, style, highlight && item.Enabled, m.HotFG)
+	}
+
+	// Right-anchored status slot (issue #500), drawn AFTER the left/right top items so
+	// the left items always own their cells. statusSlotW was clamped in layoutTopRects
+	// (0 when there is no room or no StatusText). The text is right-aligned with exactly
+	// one pad cell at the bar's last column, measured/truncated by display width so wide
+	// runes (●/○/◐ and CJK) size correctly and are never split. Overflow truncates with
+	// an ellipsis and then hides — it never wraps to a second row.
+	if m.statusSlotW > 0 {
+		statusFG := m.StatusFG
+		if statusFG == (tui.Color{}) {
+			statusFG = m.FG
+		}
+		statusBG := m.StatusBG
+		if statusBG == (tui.Color{}) {
+			statusBG = m.BG
+		}
+		textCols := m.statusSlotW - 1 // reserve one pad cell on the right
+		text := Truncate(m.StatusText, textCols, "…")
+		startX := abs.Right() - tui.StringWidth(text) // pad cell falls at abs.Right()
+		surface.WriteString(startX, abs.Y, text, tui.Cell{FG: statusFG, BG: statusBG})
 	}
 
 	// The popup geometry is clamped/flipped against the full screen so right-edge
@@ -289,14 +361,88 @@ func menuGutter(items []*MenuItem) int {
 	return 0
 }
 
+// topItemWidth returns the cell width of a top-level menu's label box. It mirrors the
+// historical formula EXACTLY — strip the '&' mnemonic marker, then len([]rune)+2 (one
+// pad cell each side) — so existing left-packed bars stay byte-for-byte unchanged. The
+// parseMnemonic step is load-bearing: every real label carries a mnemonic ("&File",
+// "&Daemon", …) and measuring the raw label would count the '&' and shift the whole
+// bar. Rune count (not display width) is kept deliberately so the measurement is
+// identical to before; only the new status slot measures by display width (see draw).
+func topItemWidth(item *MenuItem) int {
+	text, _ := parseMnemonic(item.Label)
+	return len([]rune(text)) + 2
+}
+
+// layoutTopRects positions every top-level menu, returning one rect per Menus entry,
+// index-aligned with Menus (so hit-testing, popups and mnemonic dispatch can keep
+// indexing Menus[i] ↔ topRects[i]). Left-aligned items pack from the left as before;
+// RightAligned items pack from the right edge inward, to the left of a right-anchored
+// status slot (issue #500). Precedence on the row, left → right:
+//
+//	[ left-packed menus ] … gutter … [ right-aligned menus ] [ status slot (≥1 pad) ]
+//
+// Priority when space is tight: left menus own their cells unconditionally; the status
+// slot yields first (it shrinks, then hides); right menus yield next (clamped so they
+// never start left of the left menus). All arithmetic uses the exclusive end barEnd so
+// it stays correct against the inclusive Rect.Right(). With no RightAligned item and an
+// empty StatusText this reduces to the original left-pack and produces identical rects.
 func (m *MenuBar) layoutTopRects(abs Rect) []Rect {
 	rects := make([]Rect, len(m.Menus))
+	barEnd := abs.X + abs.W // exclusive right end; columns are [abs.X, barEnd)
+
+	// (1) Left-pack left-aligned items from abs.X, exactly as before.
 	x := abs.X
 	for idx, item := range m.Menus {
-		text, _ := parseMnemonic(item.Label)
-		width := len([]rune(text)) + 2
+		if item.RightAligned {
+			continue
+		}
+		width := topItemWidth(item)
 		rects[idx] = Rect{X: x, Y: abs.Y, W: width, H: 1}
 		x += width
+	}
+	leftEnd := x // first free column after the left-packed menus
+
+	// (2) Reserve the status slot (text + exactly one pad cell). It is the lowest
+	// priority: clamp it to whatever is left after the left and right menus.
+	desiredSlotW := 0
+	if m.StatusText != "" {
+		desiredSlotW = tui.StringWidth(m.StatusText) + 1
+	}
+	rightMenusW := 0
+	for _, item := range m.Menus {
+		if item.RightAligned {
+			rightMenusW += topItemWidth(item)
+		}
+	}
+	free := barEnd - leftEnd
+	maxSlot := free - rightMenusW
+	if maxSlot < 0 {
+		maxSlot = 0
+	}
+	slotW := desiredSlotW
+	if slotW > maxSlot {
+		slotW = maxSlot
+	}
+	if slotW < 0 {
+		slotW = 0
+	}
+	m.statusSlotW = slotW
+
+	// (3) Right-pack right-aligned items, iterating in REVERSE so declared
+	// left-to-right reading order is preserved (last-declared sits nearest the slot).
+	cursor := barEnd - slotW // first column the slot owns
+	for idx := len(m.Menus) - 1; idx >= 0; idx-- {
+		item := m.Menus[idx]
+		if !item.RightAligned {
+			continue
+		}
+		width := topItemWidth(item)
+		cursor -= width
+		rx := cursor
+		if rx < leftEnd {
+			rx = leftEnd // never start left of the left-packed menus
+		}
+		rects[idx] = Rect{X: rx, Y: abs.Y, W: width, H: 1}
 	}
 	return rects
 }
