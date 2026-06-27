@@ -30,7 +30,9 @@ func LongestLineWidth(s string) int {
 // ButtonLabelWidth is the natural cell width a button needs to show its label with
 // the "[ … ]" / "► … ◄" chrome and stay readable. It strips the mnemonic marker
 // first so "&Yes" measures as "Yes", and clamps up to minButtonWidth so short
-// captions (OK/Yes/No) do not render as a cramped "[…]".
+// captions (OK/Yes/No) do not render as a cramped "[…]". Width is independent of
+// height: a taller button is not wider, so this is unaffected by bounds.H (see
+// ButtonHeight).
 func ButtonLabelWidth(label string) int {
 	clean, _ := ParseMnemonic(label)
 	width := tui.StringWidth(clean) + 4 // two cells of chrome on each side
@@ -38,6 +40,19 @@ func ButtonLabelWidth(label string) int {
 		width = minButtonWidth
 	}
 	return width
+}
+
+// ButtonHeight is the cell height a button renders at: it comes purely from the
+// button's bounds, defaulting to a single row when bounds.H is unset (0 or less).
+// A button fills every row of its bounds as a solid "[ … ]" block with the caption
+// and focus chevrons on the vertically-centred row, so a caller makes a taller
+// button simply by giving it a taller Rect. NewButtonRow uses this to size a footer
+// row to its tallest button (gogent#529).
+func ButtonHeight(bounds Rect) int {
+	if bounds.H < 1 {
+		return 1
+	}
+	return bounds.H
 }
 
 // ParseMnemonic strips the '&' mnemonic marker from a label and returns the clean
