@@ -45,6 +45,13 @@ type Theme struct {
 	// contrast with InputFocusBG rather than reuse the accent (gogent#279).
 	TextSelectionBG tui.Color
 	TextSelectionFG tui.Color
+	// PasteChipBG/FG paint a collapsed multi-line-paste "[pasted N lines]" chip inside
+	// inputs (TextBox/MultiLineInput). Like TextSelectionBG/FG the chip is drawn over
+	// the focused input fill, so it must contrast with InputFocusBG; it is also kept
+	// distinct from TextSelectionBG/FG so a selected chip still reads as a chip
+	// (gogent#501).
+	PasteChipBG tui.Color
+	PasteChipFG tui.Color
 	// Menu chrome. The menubar is always-on-top so it gets first-class fields
 	// rather than literal constants.
 	MenuBarFG    tui.Color
@@ -98,6 +105,8 @@ var DefaultTheme = Theme{
 	SelectionFG:      tui.ANSIColor(0),
 	TextSelectionBG:  tui.ANSIColor(0),  // black: inverts the cyan focused-input fill
 	TextSelectionFG:  tui.ANSIColor(15), // bright white
+	PasteChipBG:      tui.ANSIColor(5),  // magenta: a distinct tag, not the cyan focus fill
+	PasteChipFG:      tui.ANSIColor(15), // bright white
 	MenuBarFG:        tui.ANSIColor(0),
 	MenuBarBG:        tui.ANSIColor(7),
 	MenuHotFG:        tui.ANSIColor(1), // dark red on light grey
@@ -144,6 +153,8 @@ var HighContrastTheme = Theme{
 	SelectionFG:      tui.ANSIColor(0),
 	TextSelectionBG:  tui.ANSIColor(0),  // black: inverts the white focused-input fill
 	TextSelectionFG:  tui.ANSIColor(15), // white
+	PasteChipBG:      tui.ANSIColor(11), // bright yellow: luminance-driven tag, colour-blind safe
+	PasteChipFG:      tui.ANSIColor(0),  // black
 	MenuBarFG:        tui.ANSIColor(15),
 	MenuBarBG:        tui.ANSIColor(0),
 	MenuHotFG:        tui.ANSIColor(11),
