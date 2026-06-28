@@ -29,12 +29,15 @@ const (
 var colorLevel atomic.Uint32
 
 func init() {
-	colorLevel.Store(uint32(DetectColorLevel()))
+	// Env-only detection at import: ColorLevelFromEnv never consults terminfo, so
+	// importing the package never spawns infocmp. A host opts into terminfo-aware
+	// detection by installing it explicitly at startup; see the DetectColorLevel doc.
+	colorLevel.Store(uint32(ColorLevelFromEnv(os.LookupEnv)))
 }
 
-// SetColorLevel overrides the colour level used by the renderer. Apps rarely
-// need this — DetectColorLevel runs at startup — but it lets a host force a
-// level (e.g. a "--no-color" flag mapping to ColorLevelNone).
+// SetColorLevel overrides the colour level used by the renderer. A host installs
+// the resolved level here — e.g. SetColorLevel(DetectColorLevel()) for
+// terminfo-aware detection at startup, or ColorLevelNone for a "--no-color" flag.
 func SetColorLevel(level ColorLevel) {
 	colorLevel.Store(uint32(level))
 }

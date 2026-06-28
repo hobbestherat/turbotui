@@ -40,6 +40,11 @@ func InfocmpCaps(term string) (colors int, truecolor bool, ok bool) {
 	if term == "" {
 		return 0, false, false
 	}
+	// TERM is env-trusted, but a value containing a path separator could make
+	// infocmp read a compiled terminfo file rather than a DB entry; refuse it.
+	if strings.ContainsAny(term, "/\\") {
+		return 0, false, false
+	}
 	bin, err := exec.LookPath("infocmp")
 	if err != nil {
 		return 0, false, false
@@ -56,14 +61,16 @@ func InfocmpCaps(term string) (colors int, truecolor bool, ok bool) {
 }
 
 // parseTerminfoCaps extracts the "colors" number and the Tc/RGB truecolor booleans
-// from infocmp output. Capabilities appear one per line (with -1) as "name",
-// "name#number" or "name=string", optionally comma-terminated; the leading line is
-// the entry's name/aliases and is ignored. Numbers may be decimal or 0x-hex —
-// ncurses emits colors#0x100 for a 256-colour entry — so they are parsed with
-// base 0. ok becomes true once any recognised capability is seen.
+// from infocmp output. Capabilities are written as "name", "name#number" or
+// "name=string", comma-separated and (with -1) one per line; the leading entry is
+// the terminal's name/aliases and is ignored. We split on both newlines and commas
+// so parsing is robust even if a vendor's infocmp ignores -1. Numbers may be
+// decimal or 0x-hex — ncurses emits colors#0x100 for a 256-colour entry — so they
+// are parsed with base 0. ok becomes true once any recognised capability is seen.
 func parseTerminfoCaps(out string) (colors int, truecolor bool, ok bool) {
-	for _, line := range strings.Split(out, "\n") {
-		tok := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ","))
+	fields := strings.FieldsFunc(out, func(r rune) bool { return r == '\n' || r == ',' })
+	for _, field := range fields {
+		tok := strings.TrimSpace(field)
 		if tok == "" {
 			continue
 		}
