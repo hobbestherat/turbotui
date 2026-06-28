@@ -201,3 +201,89 @@ func TestParseTerminfoCapsFromRealInfocmp(t *testing.T) {
 		t.Fatalf("real infocmp xterm-direct parsed as (colors=%d truecolor=%v ok=%v), want truecolor & ok", colors, truecolor, ok)
 	}
 }
+
+// TestParseTerminfoCapsCommaSeparated locks in the comma-split robustness added
+// in fixes-round-1: the parser must handle multiple capabilities on one line
+// (the shape infocmp emits when -1 is unavailable/ignored), not just one per line.
+func TestParseTerminfoCapsCommaSeparated(t *testing.T) {
+	cases := []struct {
+		name       string
+		out        string
+		wantColors int
+		wantTC     bool
+		wantOK     bool
+	}{
+		{
+			name:       "several caps comma-separated on one line",
+			out:        "xterm-256color|xterm with 256 colors,\n\tcolors#0x100,Tc,am,\n",
+			wantColors: 256, wantTC: true, wantOK: true,
+		},
+		{
+			name:       "everything on a single line (no -1 at all)",
+			out:        "xterm,colors#256,Tc\n",
+			wantColors: 256, wantTC: true, wantOK: true,
+		},
+		{
+			name:       "decimal colors + Tc comma-separated",
+			out:        "tmux-256color,colors#256,Tc",
+			wantColors: 256, wantTC: true, wantOK: true,
+		},
+		{
+			name:       "comma-separated caps, none recognised -> ok=false",
+			out:        "weird|am,blink,xenl\n",
+			wantColors: 0, wantTC: false, wantOK: false,
+		},
+		{
+			// A string capability whose value contains an escaped comma (infocmp
+			// escapes literal commas as \,) must not corrupt the colors parse.
+			name:       "string cap with escaped comma does not break colors",
+			out:        "xterm\n\tsetab=\\E[48;5;%p1%dp\\,\n\tcolors#256\n",
+			wantColors: 256, wantTC: false, wantOK: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			colors, truecolor, ok := parseTerminfoCaps(tc.out)
+			if colors != tc.wantColors || truecolor != tc.wantTC || ok != tc.wantOK {
+				t.Fatalf("parseTerminfoCaps = (colors=%d, truecolor=%v, ok=%v), want (%d, %v, %v)",
+					colors, truecolor, ok, tc.wantColors, tc.wantTC, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestInfocmpCapsRejectsPathSeparators covers the path-injection guard added in
+// fixes-round-1: a TERM containing a path separator is refused (ok=false) BEFORE
+// infocmp is consulted, so a crafted TERM cannot make infocmp read an arbitrary
+// compiled terminfo file. Deterministic regardless of whether infocmp is installed,
+// because the guard precedes exec.LookPath.
+func TestInfocmpCapsRejectsPathSeparators(t *testing.T) {
+	for _, term := range []string{
+		"xterm/256color", // forward slash
+		"foo\\bar",       // backslash
+		"/etc/passwd",    // absolute path
+		"a/b/c",          // multi-segment
+	} {
+		t.Run(term, func(t *testing.T) {
+			if _, _, ok := InfocmpCaps(term); ok {
+				t.Fatalf("InfocmpCaps(%q) ok=true, want false (path separator must be refused)", term)
+			}
+		})
+	}
+}
+
+// TestPathBearingTermFallsOpenInDetection checks the end-to-end effect of the
+// path guard on the detector: a path-bearing TERM yields terminfo ok=false, so
+// detection falls through to the env substring fallback — no crash, no file read.
+func TestPathBearingTermFallsOpenInDetection(t *testing.T) {
+	// "xterm-256color/evil" carries "256color" as a substring -> 256 via fallback.
+	got := ColorLevelFromEnvWithTerminfo(envStub(map[string]string{"TERM": "xterm-256color/evil"}), InfocmpCaps)
+	if got != ColorLevel256 {
+		t.Fatalf("path-bearing TERM with 256color substring = %d, want 256 (fallback)", got)
+	}
+	// A path-bearing TERM with no recognisable substring -> 16.
+	got = ColorLevelFromEnvWithTerminfo(envStub(map[string]string{"TERM": "evil/path"}), InfocmpCaps)
+	if got != ColorLevel16 {
+		t.Fatalf("path-bearing TERM, no substring = %d, want 16 (fallback)", got)
+	}
+}
