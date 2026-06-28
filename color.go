@@ -44,21 +44,57 @@ func GetColorLevel() ColorLevel {
 	return ColorLevel(colorLevel.Load())
 }
 
-// DetectColorLevel inspects the process environment (NO_COLOR, COLORTERM, TERM)
-// to choose a colour level. See ColorLevelFromEnv for the exact rules.
+// DetectColorLevel chooses a colour level from the process environment and, when
+// available, the terminal's terminfo entry. It is the production detector: it
+// consults terminfo (via InfocmpCaps), which is the one colour-capability source
+// that survives an SSH hop. See ColorLevelFromEnvWithTerminfo for the exact rules.
+//
+// Note that package init() uses the env-only ColorLevelFromEnv, not this function,
+// so merely importing the package never shells out to infocmp. A host that wants
+// terminfo-aware detection installs it once at startup with
+// SetColorLevel(DetectColorLevel()).
 func DetectColorLevel() ColorLevel {
-	return ColorLevelFromEnv(os.LookupEnv)
+	return ColorLevelFromEnvWithTerminfo(os.LookupEnv, InfocmpCaps)
 }
 
 // ColorLevelFromEnv computes the colour level from a lookup function (os.LookupEnv
-// in production, a stub in tests). Rules, in order:
+// in production, a stub in tests) using environment variables only. It is exactly
+// ColorLevelFromEnvWithTerminfo with no terminfo reader; see that function for the
+// full precedence. Because it never consults terminfo it never spawns a
+// subprocess, which is why package init() uses it.
+func ColorLevelFromEnv(lookup func(string) (string, bool)) ColorLevel {
+	return ColorLevelFromEnvWithTerminfo(lookup, nil)
+}
+
+// ColorLevelFromEnvWithTerminfo computes the colour level from environment
+// variables and, when ti is non-nil, the terminal's terminfo entry. Terminfo is
+// the colour-capability source that survives an SSH hop: sshd sets a valid TERM on
+// the remote but rarely forwards COLORTERM, and the remote terminfo DB (keyed by
+// the propagated TERM) carries the "colors" number and the "Tc"/"RGB" truecolor
+// booleans. Consulting it lets a truecolor terminal be detected as truecolor even
+// when COLORTERM was dropped in transit.
 //
-//   - NO_COLOR present and non-empty            -> ColorLevelNone
+// Rules, in order (first match wins):
+//
+//   - NO_COLOR present and non-empty            -> ColorLevelNone (https://no-color.org/)
 //   - TERM == "dumb"                            -> ColorLevelNone
 //   - COLORTERM == "truecolor" | "24bit"        -> ColorLevelTrueColor
+//   - terminfo "Tc" or "RGB" boolean advertised -> ColorLevelTrueColor
+//   - terminfo "colors" >= 256                  -> ColorLevel256
 //   - TERM contains "256color"                  -> ColorLevel256
 //   - otherwise                                 -> ColorLevel16
-func ColorLevelFromEnv(lookup func(string) (string, bool)) ColorLevel {
+//
+// Terminfo (the two terminfo rules) is consulted only after COLORTERM — the
+// authoritative local signal when present, so the common local truecolor session
+// resolves without ever spawning infocmp — and before the TERM-substring fallback.
+// A nil ti skips the terminfo rules entirely, leaving pure environment detection.
+//
+// Honest detection: a generic xterm-256color terminfo entry carries colors#256 but
+// no Tc/RGB, so an SSH session whose propagated TERM advertises only 256 colours
+// still (correctly) detects 256 — detection is faithful to observable signals and
+// cannot invent capability. When ti reports ok=false (no infocmp, no entry) the
+// result is identical to env-only detection.
+func ColorLevelFromEnvWithTerminfo(lookup func(string) (string, bool), ti TerminfoCaps) ColorLevel {
 	// NO_COLOR: any non-empty value disables colour, regardless of its content.
 	if v, ok := lookup("NO_COLOR"); ok && v != "" {
 		return ColorLevelNone
@@ -70,6 +106,18 @@ func ColorLevelFromEnv(lookup func(string) (string, bool)) ColorLevel {
 	if v, ok := lookup("COLORTERM"); ok {
 		if v == "truecolor" || v == "24bit" {
 			return ColorLevelTrueColor
+		}
+	}
+	// Terminfo is consulted only when COLORTERM did not already prove truecolor, so
+	// a local truecolor session (COLORTERM set) never pays for an infocmp spawn.
+	if ti != nil {
+		if colors, truecolor, ok := ti(term); ok {
+			if truecolor {
+				return ColorLevelTrueColor
+			}
+			if colors >= 256 {
+				return ColorLevel256
+			}
 		}
 	}
 	if strings.Contains(term, "256color") {
