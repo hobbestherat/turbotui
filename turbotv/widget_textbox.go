@@ -87,6 +87,25 @@ func (t *TextBox) GetText() string {
 	return t.chips.expand(t.Text)
 }
 
+// SelectAll selects the entire text and parks the caret at the end. It is the
+// programmatic equivalent of Ctrl+A, for callers that want a field to open with
+// its initial value fully selected so the first keystroke replaces it.
+//
+// An empty field has nothing to select, so SelectAll clears the selection and
+// parks the caret at 0. Clearing rather than returning early is deliberate: a
+// prior click leaves selAnchor equal to the caret (see handleClick), and
+// insertRune advances Cursor without touching the anchor, so a stale anchor would
+// make the first typed rune select itself and the second one replace it.
+func (t *TextBox) SelectAll() {
+	if len(t.Text) == 0 {
+		t.selAnchor = -1
+		t.Cursor = 0
+		return
+	}
+	t.selAnchor = 0
+	t.Cursor = len(t.Text)
+}
+
 // pruneChips drops chip-store entries whose sentinel rune is no longer present in Text,
 // called after edits that may have removed a chip.
 func (t *TextBox) pruneChips() {
@@ -257,9 +276,7 @@ func (t *TextBox) handleCtrlShortcut(event tui.TypeEvent) bool {
 	switch event.Key {
 	case tui.KeyRune:
 		if unicode.ToLower(event.Rune) == 'a' {
-			// Select all: anchor at the start, caret at the end.
-			t.selAnchor = 0
-			t.Cursor = len(t.Text)
+			t.SelectAll()
 			return true
 		}
 		return false

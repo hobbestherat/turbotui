@@ -30,4 +30,3 @@ func fatalSignals() []os.Signal {
 func reraiseSignal(sig syscall.Signal) {
 	_ = syscall.Kill(syscall.Getpid(), sig)
 }
-

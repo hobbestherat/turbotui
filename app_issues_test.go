@@ -124,8 +124,8 @@ func TestParseMouseDistinguishesPressDragMove(t *testing.T) {
 		down, drag, move bool
 	}{
 		{"press", "<0;6;4", 'M', true, false, false},
-		{"drag", "<32;6;4", 'M', true, true, false},   // motion bit + button held
-		{"move", "<35;6;4", 'M', false, false, true},  // motion bit + no button (cb&3==3)
+		{"drag", "<32;6;4", 'M', true, true, false},  // motion bit + button held
+		{"move", "<35;6;4", 'M', false, false, true}, // motion bit + no button (cb&3==3)
 		{"release", "<0;6;4", 'm', false, false, false},
 	}
 	for _, tc := range cases {
