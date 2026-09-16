@@ -99,6 +99,180 @@ func TestTextBoxCtrlASelectAll(t *testing.T) {
 	}
 }
 
+func TestTextBoxSelectAllThenTypeReplaces(t *testing.T) {
+	box := NewTextBox("hé🙂", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+
+	if got := box.GetText(); got != "X" {
+		t.Fatalf("typing after SelectAll: text = %q, want %q", got, "X")
+	}
+	if box.Cursor != 1 || box.hasSelection() {
+		t.Fatalf("typing after SelectAll: cursor=%d selected=%v, want 1, false", box.Cursor, box.hasSelection())
+	}
+}
+
+func TestTextBoxSelectAllThenRightAppends(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRight})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+
+	if got := box.GetText(); got != "helloX" {
+		t.Fatalf("Right after SelectAll: text = %q, want %q", got, "helloX")
+	}
+	if box.Cursor != 6 || box.hasSelection() {
+		t.Fatalf("Right after SelectAll: cursor=%d selected=%v, want 6, false", box.Cursor, box.hasSelection())
+	}
+}
+
+func TestTextBoxSelectAllThenEndAppends(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyEnd})
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+
+	if got := box.GetText(); got != "helloX" {
+		t.Fatalf("End after SelectAll: text = %q, want %q", got, "helloX")
+	}
+	if box.Cursor != 6 || box.hasSelection() {
+		t.Fatalf("End after SelectAll: cursor=%d selected=%v, want 6, false", box.Cursor, box.hasSelection())
+	}
+}
+
+func TestTextBoxSelectAllThenBackspaceEmpties(t *testing.T) {
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyBackspace})
+
+	if got := box.GetText(); got != "" {
+		t.Fatalf("Backspace after SelectAll: text = %q, want empty", got)
+	}
+	if box.Cursor != 0 || box.hasSelection() {
+		t.Fatalf("Backspace after SelectAll: cursor=%d selected=%v, want 0, false", box.Cursor, box.hasSelection())
+	}
+}
+
+func TestTextBoxSelectAllEmptyFieldLeavesNoAnchor(t *testing.T) {
+	box := NewTextBox("", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+
+	if box.selAnchor != -1 || box.Cursor != 0 || box.hasSelection() {
+		t.Fatalf("SelectAll on empty field: anchor=%d cursor=%d selected=%v, want -1, 0, false", box.selAnchor, box.Cursor, box.hasSelection())
+	}
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+	if got := box.GetText(); got != "X" {
+		t.Fatalf("first rune after empty SelectAll: text = %q, want %q", got, "X")
+	}
+	if box.hasSelection() {
+		t.Fatal("first rune after empty SelectAll selected itself")
+	}
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'Y'})
+	if got := box.GetText(); got != "XY" {
+		t.Fatalf("second rune after empty SelectAll: text = %q, want %q", got, "XY")
+	}
+}
+
+func TestTextBoxSelectAllSurvivesSetFocus(t *testing.T) {
+	var output bytes.Buffer
+	desktop := NewDesktop(tui.NewWithSize(40, 5, &output))
+	box := NewTextBox("hello", Rect{X: 0, Y: 0, W: 20, H: 1})
+	box.SelectAll()
+
+	desktop.SetFocus(box)
+
+	if !box.Component.Focused() {
+		t.Fatal("SetFocus did not focus TextBox")
+	}
+	lo, hi := box.selRange()
+	if !box.hasSelection() || lo != 0 || hi != len(box.Text) {
+		t.Fatalf("selection after SetFocus: selected=%v range=(%d,%d), want true and (0,%d)", box.hasSelection(), lo, hi, len(box.Text))
+	}
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+	if got := box.GetText(); got != "X" {
+		t.Fatalf("typing after SelectAll and SetFocus: text = %q, want %q", got, "X")
+	}
+}
+
+func clickEmptyTextBox(t *testing.T, box *TextBox) {
+	t.Helper()
+	if !box.handleClick(box.Component, tui.ClickEvent{X: 0, Y: 0, Down: true}) {
+		t.Fatal("mouse-down inside empty TextBox was not consumed")
+	}
+	if !box.handleClick(box.Component, tui.ClickEvent{X: 0, Y: 0, Down: false}) {
+		t.Fatal("mouse-up inside empty TextBox was not consumed")
+	}
+	if box.selAnchor != 0 || box.Cursor != 0 || box.hasSelection() {
+		t.Fatalf("click precondition: anchor=%d cursor=%d selected=%v, want 0, 0, false", box.selAnchor, box.Cursor, box.hasSelection())
+	}
+}
+
+func assertTypingAppendsXY(t *testing.T, box *TextBox) {
+	t.Helper()
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'X'})
+	if box.hasSelection() {
+		t.Fatal("first rune selected itself")
+	}
+	box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'Y'})
+	if got := box.GetText(); got != "XY" {
+		t.Fatalf("two typed runes: text = %q, want %q", got, "XY")
+	}
+	if box.hasSelection() {
+		t.Fatal("typing left a selection")
+	}
+}
+
+func TestTextBoxSelectAllClearsStaleAnchorOnEmptyField(t *testing.T) {
+	box := NewTextBox("", Rect{X: 0, Y: 0, W: 20, H: 1})
+	clickEmptyTextBox(t, box)
+
+	box.SelectAll()
+
+	if box.selAnchor != -1 || box.Cursor != 0 || box.hasSelection() {
+		t.Fatalf("SelectAll after click: anchor=%d cursor=%d selected=%v, want -1, 0, false", box.selAnchor, box.Cursor, box.hasSelection())
+	}
+	assertTypingAppendsXY(t, box)
+}
+
+func TestTextBoxCtrlAClearsStaleAnchorOnEmptyField(t *testing.T) {
+	box := NewTextBox("", Rect{X: 0, Y: 0, W: 20, H: 1})
+	clickEmptyTextBox(t, box)
+
+	if !box.handleType(box.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'a', Ctrl: true}) {
+		t.Fatal("Ctrl+A on empty field was not consumed")
+	}
+	if box.selAnchor != -1 || box.Cursor != 0 || box.hasSelection() {
+		t.Fatalf("Ctrl+A after click: anchor=%d cursor=%d selected=%v, want -1, 0, false", box.selAnchor, box.Cursor, box.hasSelection())
+	}
+	assertTypingAppendsXY(t, box)
+}
+
+func TestTextBoxCtrlAAndSelectAllAgree(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "empty"},
+		{name: "ascii", text: "hello"},
+		{name: "unicode", text: "hé🙂"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			viaMethod := NewTextBox(tc.text, Rect{X: 0, Y: 0, W: 20, H: 1})
+			viaMethod.Cursor = 0
+			viaMethod.SelectAll()
+
+			viaKey := NewTextBox(tc.text, Rect{X: 0, Y: 0, W: 20, H: 1})
+			viaKey.Cursor = 0
+			viaKey.handleType(viaKey.Component, tui.TypeEvent{Key: tui.KeyRune, Rune: 'a', Ctrl: true})
+
+			if viaKey.selAnchor != viaMethod.selAnchor || viaKey.Cursor != viaMethod.Cursor {
+				t.Fatalf("Ctrl+A state=(anchor %d, cursor %d), SelectAll state=(anchor %d, cursor %d)", viaKey.selAnchor, viaKey.Cursor, viaMethod.selAnchor, viaMethod.Cursor)
+			}
+		})
+	}
+}
+
 func TestTextBoxCtrlArrowWordJump(t *testing.T) {
 	box := NewTextBox("hello world foo", Rect{X: 0, Y: 0, W: 30, H: 1})
 	box.Cursor = len(box.Text) // end
