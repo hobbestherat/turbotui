@@ -213,6 +213,63 @@ func TestConcurrentAddLayerKeepsEveryLayer(t *testing.T) {
 	}
 }
 
+func TestConcurrentAddLayerNotifiesEachLayerExactlyOnce(t *testing.T) {
+	app := tui.NewWithSize(20, 10, newSyncWriter())
+	desktop := NewDesktop(app)
+
+	const n = 64
+	layers := make([]*Layer, n)
+	added := make(map[*Layer]struct{}, n)
+	for i := range layers {
+		layers[i] = NewLayer("x", NewComponent(Rect{X: 0, Y: 0, W: 5, H: 1}), true, false)
+		added[layers[i]] = struct{}{}
+	}
+
+	var callsMu sync.Mutex
+	calls := make(map[*Layer]int, n)
+	total := 0
+	desktop.OnActiveLayerChange(func(top *Layer) {
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		calls[top]++
+		total++
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for _, layer := range layers {
+		go func(layer *Layer) {
+			defer wg.Done()
+			desktop.AddLayer(layer)
+		}(layer)
+	}
+	wg.Wait()
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if total != n {
+		t.Fatalf("concurrent AddLayer callback count: got %d, want %d", total, n)
+	}
+	if len(calls) != n {
+		t.Fatalf("concurrent AddLayer callback argument count: got %d distinct layers, want %d", len(calls), n)
+	}
+	for layer := range added {
+		if got := calls[layer]; got != 1 {
+			t.Fatalf("callback count for added layer %p: got %d, want 1", layer, got)
+		}
+	}
+	if got := len(desktop.layerSnapshot()); got != n {
+		t.Fatalf("concurrent AddLayer stack size: got %d, want %d", got, n)
+	}
+	top := desktop.TopLayer()
+	if _, ok := added[top]; !ok {
+		t.Fatalf("final top %p was not one of the added layers", top)
+	}
+	if desktop.lastNotifiedTop != top {
+		t.Fatalf("notification bookkeeping did not converge: lastNotifiedTop=%p TopLayer=%p", desktop.lastNotifiedTop, top)
+	}
+}
+
 // syncWriter serializes writes so the test's concurrency exercise targets the
 // desktop's layer mutex rather than racing on the output buffer itself.
 type syncWriter struct {

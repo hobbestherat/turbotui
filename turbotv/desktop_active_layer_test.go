@@ -322,6 +322,59 @@ func TestOnActiveLayerChange_AddSecondLayerFires(t *testing.T) {
 	}
 }
 
+func TestOnActiveLayerChange_MayAddLayerReentrantly(t *testing.T) {
+	d := newActiveLayerDesktop(t)
+
+	outer := NewLayer("outer", NewComponent(Rect{X: 0, Y: 0, W: 10, H: 4}), true, false)
+	inner := NewLayer("inner", NewComponent(Rect{X: 10, Y: 0, W: 10, H: 4}), true, false)
+	addedInner := false
+	calls := 0
+	d.OnActiveLayerChange(func(*Layer) {
+		calls++
+		if !addedInner {
+			addedInner = true
+			d.AddLayer(inner)
+		}
+	})
+
+	d.AddLayer(outer)
+
+	if calls != 2 {
+		t.Fatalf("expected one callback for each re-entrant addition, got %d", calls)
+	}
+	got := d.layerSnapshot()
+	if len(got) != 2 || got[0] != outer || got[1] != inner {
+		t.Fatalf("re-entrant AddLayer stack: got %v, want [%p %p]", got, outer, inner)
+	}
+	if d.TopLayer() != inner {
+		t.Fatalf("expected re-entrantly added layer to be top")
+	}
+}
+
+func TestOnActiveLayerChange_FiresBeforeAddLayerRepaints(t *testing.T) {
+	d := newActiveLayerDesktop(t)
+	const marker = 'X'
+	root := NewComponent(Rect{X: 0, Y: 0, W: 10, H: 4})
+	root.DrawFn = func(_ *VisualComponent, surface Surface) {
+		surface.SetCell(0, 0, tui.Cell{Ch: marker})
+	}
+	layer := NewLayer("marker", root, true, false)
+
+	seenInCallback := rune(0)
+	d.OnActiveLayerChange(func(*Layer) {
+		seenInCallback = d.App().ReadCell(0, 0).Ch
+	})
+
+	d.AddLayer(layer)
+
+	if seenInCallback == marker {
+		t.Fatalf("callback observed marker %q before AddLayer repaint", marker)
+	}
+	if got := d.App().ReadCell(0, 0).Ch; got != marker {
+		t.Fatalf("post-AddLayer cell: got %q, want marker %q", got, marker)
+	}
+}
+
 // --- RemoveTopLayer / RemoveLayer ------------------------------------------
 
 func TestOnActiveLayerChange_RemoveTopLayerFiresWithNewTop(t *testing.T) {

@@ -1,28 +1,34 @@
-# Design critique
+# Implementation critique
 
-There is no `docs/SPEC.md`, so the task description and the repository's existing conventions are the specification. The design conforms to both and is ready for implementation.
+## 1. High — fullscreen `LayoutFn` can self-deadlock by calling `AddLayer`
 
-The diagnosis is specific and credible: `layersMu` already protects the slice update, while concurrent `AddLayer` calls race through `lastNotifiedTop` and the synchronous `compose`/`updateCursor`/`Apply` pipeline. The proposed `mutateMu` closes those accesses without weakening or replacing `TestConcurrentAddLayerKeepsEveryLayer`.
+Files: `turbotv/desktop.go:308-325`, `turbotv/component.go:199-204`
 
-The design now handles the important behavioral constraints correctly:
+`AddLayer` acquires `mutateMu` at `desktop.go:308` and, for a fullscreen layer, calls `layer.Root.SetBounds` before releasing it. `SetBounds` synchronously invokes the component's user-provided `LayoutFn` at `component.go:202-203`.
 
-- `OnActiveLayerChange` remains synchronous and still runs before the repaint.
-- The mutex is released around `OnActiveLayerChange`, preserving re-entrant `AddLayer` behavior.
-- Concurrent callback delivery is explicitly specified as exactly once per added layer but unordered, and the proposed assertions test only schedule-independent guarantees.
-- The final `lastNotifiedTop == TopLayer()` assertion is valid after `wg.Wait()` because append and notification bookkeeping share one critical section.
-- The loop redraw callback uses the same locked paint path, preventing it from interleaving with an `AddLayer` repaint.
-- The public documentation retains loop confinement and does not overclaim general thread safety.
+Concrete failure scenario:
 
-The prior `DrawFn` contradiction is resolved. The design now accurately says:
+1. An application creates a fullscreen root with a `LayoutFn` closure that calls `desktop.AddLayer(...)`, for example to create a dependent overlay after laying out the root.
+2. It calls `desktop.AddLayer(fullscreenLayer)`.
+3. The outer call holds `mutateMu`, reaches `SetBounds`, and invokes `LayoutFn`.
+4. The nested `AddLayer` blocks forever at `desktop.go:308` trying to acquire the same non-reentrant mutex.
 
-> “It IS held across drawing, and therefore across user `DrawFn` callbacks: a `DrawFn` must not call `AddLayer` or `Redraw`, or it will deadlock.”
+This worked before the change: no mutex was held while the fullscreen layer's `LayoutFn` ran. The implementation explicitly handles the analogous re-entrant `OnActiveLayerChange` case by releasing the lock, and documents only `DrawFn` as forbidden from calling `AddLayer`; it neither documents nor avoids this new `LayoutFn` restriction. Move the fullscreen `SetBounds`/`LayoutFn` invocation outside the non-reentrant critical section, or otherwise ensure arbitrary layout callbacks are not invoked while `mutateMu` is held.
 
-It also correctly replaces the earlier “pure de-duplication” claim with an explicit acknowledgment that the new critical section changes re-entrancy behavior. Changing an already-invalid recursive draw path from unbounded recursion to deadlock is a documented, acceptable regression risk for this narrowly scoped fix.
+## 2. Medium — a recovered callback panic permanently leaves `mutateMu` locked
 
-Testability is adequate without a cluster: all proposed tests are in-process and buffer-backed, with no external services, sleeps, or wall-clock dependence. This development host's unsupported ThreadSanitizer VMA is properly treated as an environmental caveat rather than a design blocker; requiring `go test ./turbotv -race` and the full race suite on a supported host before merge satisfies the task's acceptance condition.
+Files: `turbotv/desktop.go:308-328`, `turbotv/component.go:202-203`
 
-Maintenance cost is proportionate. Production changes remain confined to `desktop.go`, lock ordering is explicit (`mutateMu` before `layersMu`), the common paint sequence is centralized in `Redraw`, and sibling mutators are deliberately left to a separately tested follow-up rather than expanding this task into general Desktop thread safety.
+The first `mutateMu` critical section uses a manual unlock at `desktop.go:328` despite invoking user code before that point: the injectable clock through `d.now()` and fullscreen `LayoutFn` through `SetBounds`. If either callback panics, the unlock is skipped.
 
-No revisions are required.
+Concrete failure scenario:
 
-DESIGN: APPROVED
+1. A fullscreen root's `LayoutFn` panics because of an application layout error.
+2. The application has a normal outer recovery boundary and recovers the panic.
+3. Any later `desktop.Redraw()` or `desktop.AddLayer(...)` blocks forever because the prior call never released `mutateMu`.
+
+The panic itself belongs to the application, but permanently poisoning the desktop after the application recovers is introduced by this implementation. Structure the critical section so the mutex is released during unwinding (or, preferably, do not execute user callbacks while holding it). This is distinct from the documented recursive-`DrawFn` restriction: the failure occurs from an ordinary layout callback panic without recursively calling a desktop method.
+
+No persisted format is involved in this change. The concurrent layer-stack and paint serialization otherwise matches the task, and the standard local suite is green; these callback paths are the remaining implementation concerns.
+
+CRITIQUE: CONCERNS
