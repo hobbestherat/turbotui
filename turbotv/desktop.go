@@ -47,9 +47,12 @@ type Desktop struct {
 	// (issue #56). layersMu guards only the slice header; this guards the state reads
 	// and the repaint around it.
 	//
-	// It is deliberately NOT held across OnActiveLayerChange, so that callback may
-	// re-enter AddLayer. It IS held across drawing, and therefore across user DrawFn
-	// callbacks: a DrawFn must not call AddLayer or Redraw, or it will deadlock.
+	// It is deliberately NOT held across the application callbacks AddLayer reaches —
+	// a fullscreen layer's LayoutFn and OnActiveLayerChange — so either may re-enter
+	// AddLayer. It IS held across drawing, and therefore across user DrawFn callbacks:
+	// a DrawFn must not call AddLayer or Redraw, or it will deadlock. Every critical
+	// section releases it with defer, so a panic out of a callback that does run under
+	// it (a DrawFn, a CursorFn, the injectable clock) cannot leave it held forever.
 	//
 	// Lock ordering: mutateMu is always acquired BEFORE layersMu, never while holding it.
 	mutateMu       sync.Mutex
@@ -298,14 +301,45 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 // which take that lock — so callers must still use the event loop or Post while Run is
 // active.
 //
-// OnActiveLayerChange is invoked outside the lock, after the stack has been updated and
-// before the repaint, so the callback observes the new top, may re-enter AddLayer, and
-// still runs before AddLayer returns. When AddLayer is called concurrently the callback
-// fires exactly once per added layer, but the order of those invocations is unspecified
-// and two may overlap; call AddLayer on the loop (or via Post) if notification order
-// matters.
+// Neither a fullscreen layer's LayoutFn nor OnActiveLayerChange runs while that lock
+// is held, so both may call back into the desktop (including AddLayer) without
+// deadlocking on it. The fullscreen layout therefore also runs outside the paint lock:
+// a repaint racing it may compose the layer mid-layout, which is one more reason
+// off-loop mutation needs Post.
+//
+// OnActiveLayerChange is invoked after the stack has been updated and before the
+// repaint, so the callback observes the new top, may re-enter AddLayer, and still runs
+// before AddLayer returns. When AddLayer is called concurrently the callback fires
+// exactly once per added layer, but the order of those invocations is unspecified and
+// two may overlap; call AddLayer on the loop (or via Post) if notification order matters.
 func (d *Desktop) AddLayer(layer *Layer) {
+	bounds, fullScreen, notify := d.pushLayer(layer)
+
+	// Both callbacks below run with no desktop lock held: SetBounds invokes the
+	// component's LayoutFn and notify invokes the application's active-layer hook, and
+	// either may re-enter AddLayer or Redraw.
+	if fullScreen {
+		layer.Root.SetBounds(bounds)
+	}
+	if notify != nil {
+		notify()
+	}
+	d.Redraw()
+}
+
+// pushLayer performs the part of AddLayer that must not interleave with a concurrent
+// AddLayer or with the paint pipeline: the append, the modal bookkeeping and the
+// active-layer notification bookkeeping (issue #56). Keeping the append and that
+// bookkeeping in one critical section is what makes concurrent adds notify exactly once
+// per layer and leave lastNotifiedTop equal to the final top.
+//
+// It executes no application callback except the injectable clock, and unlocks via
+// defer so a panic from that clock cannot leave the desktop permanently locked. The
+// work that does run application code is handed back to the caller instead: the bounds
+// a fullscreen layer is to be laid out with, and the notification to deliver.
+func (d *Desktop) pushLayer(layer *Layer) (bounds Rect, fullScreen bool, notify func()) {
 	d.mutateMu.Lock()
+	defer d.mutateMu.Unlock()
 	d.layersMu.Lock()
 	d.layers = append(d.layers, layer)
 	d.layersMu.Unlock()
@@ -322,17 +356,9 @@ func (d *Desktop) AddLayer(layer *Layer) {
 		}
 	}
 	if layer.FullScreen {
-		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
+		bounds = Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()}
 	}
-	top, notify, changed := d.takeActiveLayerChange()
-	d.mutateMu.Unlock()
-
-	// Deliver the notification with no lock held so the callback may re-enter AddLayer,
-	// and before the repaint so the ordering matches every other mutator.
-	if changed && notify != nil {
-		notify(top)
-	}
-	d.Redraw()
+	return bounds, layer.FullScreen, d.takeActiveLayerChange()
 }
 
 // WorkArea is the region windows are constrained to when dragged, resized or
@@ -407,25 +433,30 @@ func (d *Desktop) OnActiveLayerChange(fn func(top *Layer)) {
 // registered after layers already exist is not fired spuriously on the next
 // mutation. Call it on the event loop after the layer stack has been updated.
 func (d *Desktop) notifyActiveLayerChange() {
-	if top, notify, changed := d.takeActiveLayerChange(); changed && notify != nil {
-		notify(top)
+	if notify := d.takeActiveLayerChange(); notify != nil {
+		notify()
 	}
 }
 
-// takeActiveLayerChange updates the last-notified top and reports the new top, the
-// callback to invoke and whether the top changed at all. It exists so AddLayer can do
-// the bookkeeping while holding mutateMu and deliver the callback after releasing it;
-// returning the callback rather than reading the field later keeps that read inside the
-// critical section too. Like notifyActiveLayerChange it advances lastNotifiedTop even
-// when no callback is registered, so a callback registered after layers already exist is
-// not fired spuriously on the next mutation.
-func (d *Desktop) takeActiveLayerChange() (top *Layer, notify func(*Layer), changed bool) {
-	top = d.TopLayer()
+// takeActiveLayerChange advances the last-notified top and returns the delivery to
+// perform, or nil when the top did not change or no callback is registered. Returning a
+// closure rather than the raw callback exists so AddLayer can do the bookkeeping — and
+// the reads of lastNotifiedTop, onActiveLayerChange and the new top it needs — inside
+// its critical section, then deliver the notification after releasing the lock. Like
+// notifyActiveLayerChange it advances lastNotifiedTop even when no callback is
+// registered, so a callback registered after layers already exist is not fired
+// spuriously on the next mutation.
+func (d *Desktop) takeActiveLayerChange() func() {
+	top := d.TopLayer()
 	if top == d.lastNotifiedTop {
-		return top, nil, false
+		return nil
 	}
 	d.lastNotifiedTop = top
-	return top, d.onActiveLayerChange, true
+	notify := d.onActiveLayerChange
+	if notify == nil {
+		return nil
+	}
+	return func() { notify(top) }
 }
 
 // handleResize is the desktop's terminal-resize handler. It first clamps every
