@@ -213,13 +213,20 @@ func (c *VisualComponent) SetBounds(bounds Rect) {
 // notification, because a LayoutFn may call back into the desktop — including
 // AddLayer. Splitting it here rather than inlining the two statements at that call
 // site keeps SetBounds the single definition of what setting bounds does.
+//
+// The returned closure captures the LayoutFn it nil-checked rather than re-reading the
+// field, so the call it makes is the one this call scheduled. Anything running between
+// the two moments — for AddLayer, the active-layer notification — is free to clear or
+// replace c.LayoutFn, and a closure reading the field at invocation time would call a
+// nil function (a panic) or silently run a replacement the caller never observed.
 func (c *VisualComponent) setBoundsNoLayout(bounds Rect) (layout func()) {
 	c.Bounds = bounds
 	c.invalidateAbs()
-	if c.LayoutFn == nil {
+	layoutFn := c.LayoutFn
+	if layoutFn == nil {
 		return nil
 	}
-	return func() { c.LayoutFn(c) }
+	return func() { layoutFn(c) }
 }
 
 func (c *VisualComponent) AddChild(child Widget) {

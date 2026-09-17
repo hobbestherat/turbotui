@@ -172,3 +172,59 @@ func mustPanic(t *testing.T, what string, fn func()) {
 	}()
 	fn()
 }
+
+// TestAddLayerLayoutFnSurvivesCallbackClearingIt pins the consequence of AddLayer
+// deliberately running the active-layer notification between the moment a fullscreen
+// root's LayoutFn is checked and the moment it is called: the callback may mutate the
+// layer it is handed, including the public LayoutFn field. The scheduled layout must
+// still be the function that was checked — re-reading the field at invocation time
+// panics on nil and silently runs a replacement otherwise.
+func TestAddLayerLayoutFnSurvivesCallbackClearingIt(t *testing.T) {
+	app := tui.NewWithSize(20, 8, &bytes.Buffer{})
+	d := NewDesktop(app)
+
+	root := NewComponent(Rect{X: 0, Y: 0, W: 1, H: 1})
+	layouts := 0
+	root.LayoutFn = func(*VisualComponent) { layouts++ }
+	d.OnActiveLayerChange(func(top *Layer) { top.Root.LayoutFn = nil })
+
+	d.AddLayer(NewLayer("fullscreen", root, true, true))
+
+	if layouts != 1 {
+		t.Fatalf("LayoutFn calls: got %d, want 1", layouts)
+	}
+}
+
+// TestAddLayerLayoutFnIgnoresCallbackReplacingIt is the other half: a callback that
+// swaps in a different LayoutFn does not get it run in place of the one the stretch
+// scheduled. The assertion is on the first layout to run after the notification —
+// later ones come from the repaint AddLayer ends with, which re-stretches and redraws
+// every fullscreen root and so legitimately runs whatever LayoutFn the field holds by
+// then. Re-reading the field at invocation time instead makes the replacement the
+// first (and the original never run at all).
+func TestAddLayerLayoutFnIgnoresCallbackReplacingIt(t *testing.T) {
+	app := tui.NewWithSize(20, 8, &bytes.Buffer{})
+	d := NewDesktop(app)
+
+	root := NewComponent(Rect{X: 0, Y: 0, W: 1, H: 1})
+	var ran []string
+	root.LayoutFn = func(*VisualComponent) { ran = append(ran, "original") }
+	d.OnActiveLayerChange(func(top *Layer) {
+		top.Root.LayoutFn = func(*VisualComponent) { ran = append(ran, "replacement") }
+	})
+
+	d.AddLayer(NewLayer("fullscreen", root, true, true))
+
+	if len(ran) == 0 || ran[0] != "original" {
+		t.Fatalf("first layout after the notification: got %v, want original first", ran)
+	}
+	originals := 0
+	for _, which := range ran {
+		if which == "original" {
+			originals++
+		}
+	}
+	if originals != 1 {
+		t.Fatalf("original LayoutFn calls: got %d, want 1 (the scheduled one) in %v", originals, ran)
+	}
+}

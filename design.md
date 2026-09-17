@@ -565,3 +565,12 @@ remains the single definition of what setting bounds does.
 Residual observable change, accepted and documented on `AddLayer`: a callback for a fullscreen layer
 sees the stretched root but not yet whatever its `LayoutFn` does to the children. That is the
 narrowest available consequence of giving up delivery-time recomputation.
+
+**9.3 — the deferred layout closure pins the function it checked.** Splitting `SetBounds` in 9.2
+puts application code (the notification) between the moment `setBoundsNoLayout` nil-checks
+`LayoutFn` and the moment the returned closure calls it, and that callback is handed the layer, so
+it can reach `top.Root.LayoutFn`. A closure that re-reads the field calls a nil function — a panic —
+when the callback clears it, and silently runs a substitute when the callback replaces it. The
+closure therefore captures the checked function value in a local and calls that. The gap is created
+by this design, so closing it is part of it: `SetBounds` never had the gap, because it checked and
+called in consecutive statements.
