@@ -73,4 +73,3 @@ func fatalSignals() []os.Signal {
 // Windows (there is no syscall.Kill). The terminal has already been restored by
 // the caller, so Run simply returns and the process exits normally.
 func reraiseSignal(syscall.Signal) {}
-

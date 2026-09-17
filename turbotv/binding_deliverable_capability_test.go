@@ -21,7 +21,7 @@ import (
 // This is criterion 4 made into a build-time check.
 var (
 	_ func(tui.KeyCode, rune, bool, bool, bool) (bool, string) = tui.Deliverability
-	_ func() (bool, string)                                       = Chord{}.Deliverable
+	_ func() (bool, string)                                    = Chord{}.Deliverable
 )
 
 // TestChordDeliverableCtrlShiftGogent464 pins the exact #464 chord at the public
