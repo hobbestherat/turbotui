@@ -142,8 +142,12 @@ no other package is touched.
    // calls from different goroutines cannot both be inside compose/Apply — which
    // write the App's shared back/front cell buffers, flush buffer and cursor state
    // (issue #56). layersMu guards only the slice header; this guards the state reads
-   // and the repaint around it. It is deliberately NOT held across user callbacks
-   // (OnActiveLayerChange, DrawFn), so a callback may re-enter AddLayer.
+   // and the repaint around it.
+   //
+   // It is deliberately NOT held across OnActiveLayerChange, so that callback may
+   // re-enter AddLayer. It IS held across drawing, and therefore across user DrawFn
+   // callbacks: a DrawFn must not call AddLayer or Redraw, or it will deadlock.
+   //
    // Lock ordering: mutateMu is always acquired BEFORE layersMu, never while holding it.
    mutateMu sync.Mutex
    ```
@@ -220,14 +224,25 @@ no other package is touched.
    app.SetRedrawFn(func() { desktop.Redraw() })   // was: compose(); updateCursor(); Apply()
    ```
 
-   The `redrawFn` body at `desktop.go:98-100` is **byte-for-byte identical** to `Redraw`'s, so this
-   is a pure de-duplication — and it means `AddLayer`'s repaint and the run loop's coalesced
-   repaint serialize against each other rather than racing. C6 shows no `turbotv` test overrides
-   this `redrawFn`, so frame accounting is unaffected. This does not enlarge any critical section;
-   it applies the same-size one at the other paint call site.
+   The `redrawFn` body at `desktop.go:98-100` is **byte-for-byte identical** to `Redraw`'s, so the
+   *paint sequence* is de-duplicated and the two paint paths can no longer drift apart. But this is
+   **not** a behaviour-neutral refactor, and should not be described as one: it introduces a new
+   critical section around the entire paint pipeline — `compose()` included, and therefore around
+   arbitrary user `DrawFn` callbacks. Two things change:
 
-5. **Doc comments** on `AddLayer` (`desktop.go:263-269`) and the threading-contract block
-   (`desktop.go:18-29`): state the narrow, implemented guarantee only — see §3.3.
+   - **Synchronization:** `AddLayer`'s repaint and the run loop's coalesced repaint now serialize
+     against each other instead of racing. This is the point of the change.
+   - **Re-entrancy:** a `DrawFn` that calls `Redraw` or `AddLayer` now deadlocks, where today it
+     recurses until the stack overflows. Both are bugs and neither is a supported pattern (C3
+     confirms no in-package path does it), but the failure mode changes. This is the accepted
+     trade-off, documented on the `Redraw` doc comment, on the `mutateMu` field, and as R2.
+
+   C6 shows no `turbotv` test overrides this `redrawFn`, so frame *accounting* is unaffected: the
+   new body performs exactly the same single compose+Apply the old one did.
+
+5. **Doc comments** on `AddLayer` (`desktop.go:263-269`), `Redraw` (`desktop.go:662`) and the
+   threading-contract block (`desktop.go:18-29`): state the narrow, implemented guarantee only, and
+   state the new `DrawFn` constraint on `Redraw` — see §3.3.
 
 ### 3.2 Why this removes the race
 
@@ -236,8 +251,8 @@ Every shared location enumerated in §1 — `d.focused`, `d.nowFn`, `d.lastNotif
 inside one of the two `mutateMu` critical sections. The only code between them is the user
 callback, which in `TestConcurrentAddLayerKeepsEveryLayer` is unregistered (no callback ⇒ `cb` is
 nil ⇒ the gap is empty). The mutex establishes happens-before edges between consecutive `AddLayer`
-calls, so the detector sees no unsynchronized concurrent access. The fix is race-free **by
-construction** over the enumerated set, not by observation.
+calls, so the detector sees no unsynchronized concurrent access — the argument is over the
+enumerated set, not over an observed run (see §5.1 for why that distinction matters here).
 
 The two sections are *not* atomic with respect to each other: between them another `AddLayer` may
 complete. That is harmless — the second section is a full recompose from current state, so the
@@ -255,6 +270,11 @@ and add only this:
 > thread-safety: `AddLayer` still races with the input handlers, `SetFocus`, `RemoveLayer`,
 > `RaiseLayer` and every other desktop mutator, none of which take this lock. Callers must still
 > use the event loop or `Post` while `Run` is active.
+
+and on `Redraw`:
+
+> A `DrawFn` invoked during compose runs with the desktop's paint lock held and must not call
+> `Redraw` or `AddLayer`. (Doing so already recursed without bound; it now deadlocks instead.)
 
 Specifically **not** claimed: that `AddLayer` is "safe to call from any goroutine", or that the
 whole mutate-and-repaint operation is atomic. Claiming either would document behaviour the
@@ -429,7 +449,7 @@ How confidence is obtained instead:
 | # | Risk | Why it could break | Mitigation / check |
 | --- | --- | --- | --- |
 | R1 | **Deadlock via re-entrancy.** | `sync.Mutex` is not reentrant; any path reaching `AddLayer` or `Redraw` while `mutateMu` is held hangs. | C3: no in-package path does. The callback — the one plausible case (C5) — is fired between the two critical sections, and §5 test (2a) locks that in. |
-| R2 | **`Redraw` is now self-locking: a user `DrawFn` that calls `Redraw` deadlocks instead of overflowing the stack.** | `compose()` runs under `mutateMu` and invokes user `DrawFn`s. | Both are bugs and neither is supported (today it recurses infinitely). The failure mode changes from crash to hang; called out in the `Redraw` doc comment. |
+| R2 | **`Redraw` is now self-locking: a user `DrawFn` that calls `Redraw` deadlocks instead of overflowing the stack.** | `compose()` runs under `mutateMu` and invokes user `DrawFn`s. | Both are bugs and neither is supported (today it recurses infinitely). The failure mode changes from crash to hang; called out in the `Redraw` doc comment (§3.3), the `mutateMu` field comment and §3.1(4). |
 | R3 | **Lock-ordering inversion with `layersMu`.** | `AddLayer` nests `layersMu` inside `mutateMu`. | C4: no site acquires `mutateMu` while holding `layersMu`. Rule documented on the field. |
 | R4 | **Over-reading the guarantee.** | `mutateMu` makes `AddLayer` safe against `AddLayer`, and its repaint safe against the loop's repaint — not against input handlers or the other mutators, which do not take it. | §3.3 states the limit precisely; the "call it on the loop or via `Post`" requirement is retained verbatim, and the PR description will repeat it. |
 | R5 | **Coalesced-redraw frame accounting changes.** | `desktop_redraw_coalesce_test.go` counts frames; §3.1(4) rewrites the `redrawFn`. | The new `redrawFn` body is byte-for-byte what `Redraw` already does, so paint count is unchanged; C6 confirms no `turbotv` test replaces it. These tests are the C1 canaries and must stay green. |
@@ -438,7 +458,44 @@ How confidence is obtained instead:
 | R8 | **Throughput under contention.** | 64 goroutines serialize through a full compose+Apply each. | Bounded and tiny at 20×10; correctness outranks it, and supported usage is single-goroutine. |
 | R9 | **Modal reads under lock** (`d.focused`, `d.now()`). | `d.now()` invokes the injectable `nowFn` inside the critical section. | Test clocks return a time and do not call back into the desktop (`SetClock`, `desktop.go:166-168`). `desktop_modal_guard_test.go` covers it. |
 
-## 7. Open questions
+## 7. Responses to critique
+
+**Point 1 — the `mutateMu` field comment was false about `DrawFn`. Accepted; the critique is
+exactly right and the contradiction was mine.** `Redraw` holds `mutateMu` across `compose()`, and
+`compose()` calls `layer.Root.Draw(surface)`, which invokes user `DrawFn` code — so the lock *is*
+held across every `DrawFn`, directly contradicting the field comment while R2 said the opposite.
+The comment in §3.1(1) now reads: not held across `OnActiveLayerChange` (so that callback may
+re-enter `AddLayer`); **held** across drawing and therefore across `DrawFn`, which must not call
+`AddLayer` or `Redraw`. I also propagated the constraint to §3.3, so it appears in the user-facing
+`Redraw` doc comment rather than living only in an internal field comment — a `DrawFn` author is
+the person who needs to read it.
+
+**Point 2 — "pure de-duplication" / "does not enlarge any critical section" was inaccurate.
+Accepted.** Routing the loop's `redrawFn` through the self-locking `Redraw` de-duplicates the paint
+*sequence*, but it does create a new critical section around the whole paint pipeline including
+arbitrary draw callbacks. §3.1(4) no longer claims neutrality; it now names both changes explicitly
+— synchronization (the two paint paths serialize, which is the intent) and re-entrancy (an invalid
+recursive draw changes from stack overflow to deadlock, the accepted trade-off) — and keeps the
+narrower true claim that frame *accounting* is unaffected because the new body performs the same
+single compose+Apply.
+
+**Point 3 — duplicated sentence in §3.2. Acted on, with a correction.** There is no literal
+duplicate inside §3.2; I re-read the section and grepped the file, and the phrase occurs once
+(the `**by\nconstruction**` bold spanning a line break may have read as one). The underlying
+observation is fair, though: the "race-free by construction, not by observation" claim was made
+twice in the document — once in §3.2 and again in §5.1. I removed the §3.2 instance and left it in
+§5.1, where it earns its place as the answer to "you cannot run `-race` locally, so why should
+anyone believe this?"
+
+**Also fixed, not raised in the critique:** the cross-references to "§8 Q1 / Q2 / Q4" were stale —
+Open questions was §7. Inserting this section as §7 and renumbering Open questions to §8 makes
+every one of them resolve correctly.
+
+**No other changes.** The critique states no further architectural change is needed, and I have not
+altered the lock design, the two-critical-section structure of `AddLayer`, the callback placement,
+the documented guarantee, the test plan, or the open questions.
+
+## 8. Open questions
 
 1. **Should the sibling mutators get the same treatment?** `RemoveLayer`, `RemoveTopLayer` and
    `RaiseLayer` have the identical mutate-then-`Redraw` shape and the same state race (their
