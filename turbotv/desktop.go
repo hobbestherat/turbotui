@@ -49,10 +49,13 @@ type Desktop struct {
 	//
 	// It is deliberately NOT held across the application callbacks AddLayer reaches —
 	// a fullscreen root's LayoutFn and OnActiveLayerChange — so either may re-enter
-	// AddLayer. It IS held across drawing, and therefore across user DrawFn callbacks:
-	// a DrawFn must not call AddLayer or Redraw, or it will deadlock. Every critical
-	// section releases it with defer, so a panic out of a callback that does run under
-	// it (a DrawFn, a CursorFn, the injectable clock) cannot leave it held forever.
+	// AddLayer. It IS held across drawing, and therefore across the user LayoutFn and
+	// DrawFn callbacks Draw invokes for every visible component on every paint: those
+	// must not call AddLayer or Redraw, or they will deadlock. The asymmetry is why
+	// this mutex does not make application callbacks mutually exclusive — see AddLayer
+	// — only the desktop state around them. Every critical section releases it with
+	// defer, so a panic out of a callback that does run under it (a LayoutFn, a DrawFn,
+	// a CursorFn, the injectable clock) cannot leave it held forever.
 	//
 	// Lock ordering: mutateMu is always acquired BEFORE layersMu, never while holding it.
 	mutateMu       sync.Mutex
@@ -303,7 +306,13 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 //
 // Neither a fullscreen root's LayoutFn nor OnActiveLayerChange runs while that lock is
 // held, so both may call back into the desktop (including AddLayer) without deadlocking
-// on it.
+// on it. What the lock protects is therefore the desktop's own state, not application
+// callbacks: a concurrent AddLayer's repaint runs every visible component's LayoutFn and
+// DrawFn (Draw invokes both on every paint) while this call is inside its own LayoutFn
+// or notification, so the same callback can be executing twice at once. The desktop
+// cannot serialize those without holding the lock across a callback free to re-enter
+// AddLayer, which self-deadlocks. It is one more reason off-loop mutation needs Post: a
+// callback invoked from two goroutines is safe only if the callback itself is.
 //
 // OnActiveLayerChange is invoked after the stack has been updated and before the
 // repaint, so the callback observes the new top, may re-enter AddLayer, and still runs

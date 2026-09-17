@@ -574,3 +574,28 @@ when the callback clears it, and silently runs a substitute when the callback re
 closure therefore captures the checked function value in a local and calls that. The gap is created
 by this design, so closing it is part of it: `SetBounds` never had the gap, because it checked and
 called in consecutive statements.
+
+**9.4 — `mutateMu` serializes the desktop's state, not the application's callbacks.** §2 framed the
+hazard as "two `AddLayer` calls corrupting the stack or interleaving inside the paint pipeline", and
+that is what the lock fixes. It does not make application callbacks mutually exclusive, and cannot.
+`VisualComponent.Draw` invokes `LayoutFn` and `DrawFn` for every visible component on every paint
+(`component.go:305`), so a second goroutine's `AddLayer` reaches, under `mutateMu`, the same user
+callbacks a first goroutine may be running outside it — whether the layer is fullscreen or not.
+Reproduced: park goroutine 1 inside a fullscreen root's `LayoutFn`, call `AddLayer` for any second
+layer from goroutine 2, and that root's `LayoutFn` is in flight twice.
+
+Closing it would mean holding `mutateMu` across a callback that is free to re-enter `AddLayer` —
+the self-deadlock 9.1 was forced to remove, and which `TestAddLayerFullScreenLayoutFnMayAddLayer`
+now pins. The two cannot both hold. This is also not a regression: before the task `SetBounds` ran
+with no lock at all (`desktop.go:286-288` at `4151a29`) and `Redraw` took none, so the overlap
+predates the lock; 9.2 narrowed it by moving the `Rect` write inside the critical section, leaving
+only the callback bodies outside.
+
+The residual is therefore documented rather than fixed, on both `mutateMu` and `AddLayer`: the lock
+protects desktop state, and a callback reached from two goroutines is safe only if the callback
+itself is — one more reason the threading contract requires `Post`. The disclosure 9.2's doc rewrite
+dropped ("a repaint racing it may compose the layer mid-layout") is restored in that stronger form.
+`TestConcurrentAddLayerFullScreenWithLayoutFnKeepsEveryLayer` covers the fullscreen-with-`LayoutFn`
+form of the concurrency class the target test leaves untouched, asserting the guarantees that do
+hold — no lost layer, exactly-once notification, every root stretched, bookkeeping converged — and
+using an atomic counter to model the rule the callback itself must follow.

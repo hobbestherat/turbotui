@@ -3,6 +3,7 @@ package tv
 import (
 	"bytes"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	tui "github.com/hobbestherat/turbotui"
@@ -260,6 +261,85 @@ func TestConcurrentAddLayerNotifiesEachLayerExactlyOnce(t *testing.T) {
 	}
 	if got := len(desktop.layerSnapshot()); got != n {
 		t.Fatalf("concurrent AddLayer stack size: got %d, want %d", got, n)
+	}
+	top := desktop.TopLayer()
+	if _, ok := added[top]; !ok {
+		t.Fatalf("final top %p was not one of the added layers", top)
+	}
+	if desktop.lastNotifiedTop != top {
+		t.Fatalf("notification bookkeeping did not converge: lastNotifiedTop=%p TopLayer=%p", desktop.lastNotifiedTop, top)
+	}
+}
+
+// TestConcurrentAddLayerFullScreenWithLayoutFnKeepsEveryLayer is the fullscreen form of
+// TestConcurrentAddLayerKeepsEveryLayer. That test adds only windowed layers with no
+// LayoutFn, so it never exercises the AddLayer path that hands a layout closure back to
+// run outside the lock, nor the compose/Draw path that re-runs a fullscreen root's
+// LayoutFn on every repaint.
+//
+// It asserts what the desktop actually guarantees under concurrent AddLayer: no layer is
+// lost, every layer is notified exactly once, and the bookkeeping converges. It does not
+// assert that the LayoutFns are mutually exclusive, because they are not — a concurrent
+// AddLayer's repaint runs every visible component's LayoutFn while another goroutine is
+// inside its own, and the desktop cannot serialize that without holding its lock across
+// a callback free to re-enter AddLayer. The counter below is atomic for exactly that
+// reason: it stands in for the "a callback invoked from two goroutines is safe only if
+// the callback itself is" rule AddLayer documents.
+func TestConcurrentAddLayerFullScreenWithLayoutFnKeepsEveryLayer(t *testing.T) {
+	app := tui.NewWithSize(20, 10, newSyncWriter())
+	desktop := NewDesktop(app)
+
+	const n = 64
+	var layouts atomic.Int64
+	layers := make([]*Layer, n)
+	added := make(map[*Layer]struct{}, n)
+	for i := range layers {
+		root := NewComponent(Rect{X: 0, Y: 0, W: 1, H: 1})
+		root.LayoutFn = func(*VisualComponent) { layouts.Add(1) }
+		layers[i] = NewLayer("fullscreen", root, true, true)
+		added[layers[i]] = struct{}{}
+	}
+
+	var callsMu sync.Mutex
+	calls := make(map[*Layer]int, n)
+	desktop.OnActiveLayerChange(func(top *Layer) {
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		calls[top]++
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for _, layer := range layers {
+		go func(layer *Layer) {
+			defer wg.Done()
+			desktop.AddLayer(layer)
+		}(layer)
+	}
+	wg.Wait()
+
+	if got := len(desktop.layerSnapshot()); got != n {
+		t.Fatalf("concurrent fullscreen AddLayer lost layers: got %d, want %d", got, n)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	for layer := range added {
+		if got := calls[layer]; got != 1 {
+			t.Fatalf("callback count for fullscreen layer %p: got %d, want 1", layer, got)
+		}
+	}
+	// Every fullscreen root is stretched under the lock, before its LayoutFn and before
+	// any repaint can compose it, so none is left at its pre-stretch rect.
+	want := Rect{X: 0, Y: 0, W: 20, H: 10}
+	for _, layer := range layers {
+		if layer.Root.Bounds != want {
+			t.Fatalf("fullscreen root bounds: got %v, want %v", layer.Root.Bounds, want)
+		}
+	}
+	// Each add runs its own root's LayoutFn once directly; the repaints run more. The
+	// floor is what pins that the scheduled layout is not skipped under contention.
+	if got := layouts.Load(); got < n {
+		t.Fatalf("fullscreen LayoutFn invocations: got %d, want at least %d", got, n)
 	}
 	top := desktop.TopLayer()
 	if _, ok := added[top]; !ok {
