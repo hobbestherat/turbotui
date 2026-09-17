@@ -599,3 +599,35 @@ dropped ("a repaint racing it may compose the layer mid-layout") is restored in 
 form of the concurrency class the target test leaves untouched, asserting the guarantees that do
 hold — no lost layer, exactly-once notification, every root stretched, bookkeeping converged — and
 using an atomic counter to model the rule the callback itself must follow.
+
+**9.5 — notify-once-per-append and argument-is-the-live-top cannot both hold off the loop.** The
+critique is right that a parked handler can publish a stale active layer: goroutine 1 adds A and
+blocks inside the callback, goroutine 2 adds B and runs its callback to completion, goroutine 1
+resumes and re-syncs derived state from its argument A while `TopLayer()` is B. Reproduced exactly
+as described.
+
+It is not fixable alongside what is already pinned. §3.4's exactly-once guarantee
+(`TestConcurrentAddLayerNotifiesEachLayerExactlyOnce`) forces n concurrent adds to produce n
+callbacks, so n-1 of the arguments name a layer that is not the final top. For each of those to
+satisfy `argument == TopLayer()` when the handler reads it, the next append must be excluded for
+the duration of the callback — a lock held across application code free to re-enter `AddLayer`,
+which is the self-deadlock 9.1 removed and which `TestOnActiveLayerChange_MayAddLayerReentrantly`
+and `TestAddLayerFullScreenLayoutFnMayAddLayer` now forbid. Satisfying all three at once needs a
+re-entrant lock keyed on goroutine identity, which §3.4 already rejected and Go does not offer. The
+other escape, recomputing the argument at delivery, is the pre-lock behaviour 9.2 gave up: it
+delivers n callbacks all naming the final top, which breaks exactly-once.
+
+So the defect is in what the doc claimed, not in what the code does. `OnActiveLayerChange` stated
+"a handler reading `TopLayer()` observes the new top" without a qualifier, so it read as a promise
+that survives off-loop concurrency; the qualification lived only in `AddLayer`'s comment, which is
+not where a reader of the callback contract looks. Both are now explicit: the guarantee is
+loop-scoped — on the loop, mutations and deliveries strictly alternate and the argument IS the live
+top, which is what makes the sanctioned "re-sync derived state from the argument" use sound — and
+off the loop the contract does not apply rather than applying in a weakened form.
+
+`TestAddLayerFullScreenLayoutFnNotifiesInTopOrder` already pins the loop-scoped property, asserting
+`argument == TopLayer()` on entry to every delivery, including a re-entrant one. On entry is the
+exact claim: a handler that itself adds a layer displaces the top for the rest of its own body,
+sequentially and by its own action, and the nested add delivers its own notification first. No test asserts the
+concurrent case, deliberately: its outcome is a race between two goroutines, and a test that pinned
+either resolution would pin non-determinism.

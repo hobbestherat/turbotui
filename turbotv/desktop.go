@@ -317,8 +317,14 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 // OnActiveLayerChange is invoked after the stack has been updated and before the
 // repaint, so the callback observes the new top, may re-enter AddLayer, and still runs
 // before AddLayer returns. When AddLayer is called concurrently the callback fires
-// exactly once per added layer, but the order of those invocations is unspecified and
-// two may overlap; call AddLayer on the loop (or via Post) if notification order matters.
+// exactly once per added layer, but the order of those invocations is unspecified, two
+// may overlap, and — because the argument is reserved under the lock and delivered after
+// it — an invocation may carry a layer a later append has already displaced, so it is
+// not necessarily TopLayer() by the time the handler reads it. Exactly-once-per-append
+// and argument-is-the-live-top cannot both hold here: keeping the second would mean
+// excluding the next append for the duration of the callback, i.e. holding the lock
+// across code free to re-enter AddLayer. Call AddLayer on the loop (or via Post) if
+// either the order or the liveness of the argument matters; see OnActiveLayerChange.
 //
 // A fullscreen layer's root is stretched to the terminal before that callback — so a
 // callback reading the new top's bounds sees the stretched ones — but its LayoutFn runs
@@ -438,6 +444,23 @@ func (d *Desktop) OnResize(fn func()) {
 // stack has been updated, so a handler reading TopLayer() observes the new top.
 // Only one callback may be registered; a later call replaces it, and a nil fn
 // disables notification. Must be called on the event loop or via Post.
+//
+// That "reading TopLayer() observes the new top" guarantee is loop-scoped, like the
+// rest of this contract, and it is the reason re-syncing derived state from the
+// argument is sound: on the loop, mutations and deliveries alternate on one goroutine,
+// so on entry to the handler the argument IS the live top. (A handler that itself adds
+// or raises a layer displaces it for the remainder of its own body, but that is its own
+// sequential doing, and the nested mutation delivers its own notification first.) Off
+// the loop neither holds. AddLayer reserves one notification per append under its mutex
+// but delivers it after releasing it (it must — the callback may re-enter AddLayer), so
+// two concurrent adds can deliver in either order and the argument is the top as of the
+// append that reserved it, which a later append may already have displaced. A handler
+// that parks and then writes derived state from its argument can therefore publish a
+// layer that is no longer active. This is not a weaker form of the loop contract that
+// callers can code around; it is the contract not applying, which is what "must be
+// called on the event loop or via Post" means.
+// Notify-once-per-append and argument-is-the-live-top are different guarantees once
+// deliveries overlap, and only the first survives concurrency (see design.md 9.5).
 func (d *Desktop) OnActiveLayerChange(fn func(top *Layer)) {
 	d.onActiveLayerChange = fn
 }
