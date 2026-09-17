@@ -48,7 +48,7 @@ type Desktop struct {
 	// and the repaint around it.
 	//
 	// It is deliberately NOT held across the application callbacks AddLayer reaches —
-	// a fullscreen layer's LayoutFn and OnActiveLayerChange — so either may re-enter
+	// a fullscreen root's LayoutFn and OnActiveLayerChange — so either may re-enter
 	// AddLayer. It IS held across drawing, and therefore across user DrawFn callbacks:
 	// a DrawFn must not call AddLayer or Redraw, or it will deadlock. Every critical
 	// section releases it with defer, so a panic out of a callback that does run under
@@ -301,43 +301,50 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 // which take that lock — so callers must still use the event loop or Post while Run is
 // active.
 //
-// Neither a fullscreen layer's LayoutFn nor OnActiveLayerChange runs while that lock
-// is held, so both may call back into the desktop (including AddLayer) without
-// deadlocking on it. The fullscreen layout therefore also runs outside the paint lock:
-// a repaint racing it may compose the layer mid-layout, which is one more reason
-// off-loop mutation needs Post.
+// Neither a fullscreen root's LayoutFn nor OnActiveLayerChange runs while that lock is
+// held, so both may call back into the desktop (including AddLayer) without deadlocking
+// on it.
 //
 // OnActiveLayerChange is invoked after the stack has been updated and before the
 // repaint, so the callback observes the new top, may re-enter AddLayer, and still runs
 // before AddLayer returns. When AddLayer is called concurrently the callback fires
 // exactly once per added layer, but the order of those invocations is unspecified and
 // two may overlap; call AddLayer on the loop (or via Post) if notification order matters.
+//
+// A fullscreen layer's root is stretched to the terminal before that callback — so a
+// callback reading the new top's bounds sees the stretched ones — but its LayoutFn runs
+// after, so a LayoutFn that itself adds a layer cannot make this call's notification
+// stale. That is the one ordering the pre-lock implementation had and this one cannot:
+// it recomputed the top at delivery time, which is incompatible with the exactly-once
+// concurrent guarantee above (the notification must be reserved under the lock). The
+// visible consequence is narrow — a callback on a fullscreen layer observes the
+// stretched root but not yet whatever its LayoutFn does to the children.
 func (d *Desktop) AddLayer(layer *Layer) {
-	bounds, fullScreen, notify := d.pushLayer(layer)
+	layout, notify := d.pushLayer(layer)
 
-	// Both callbacks below run with no desktop lock held: SetBounds invokes the
-	// component's LayoutFn and notify invokes the application's active-layer hook, and
-	// either may re-enter AddLayer or Redraw.
-	if fullScreen {
-		layer.Root.SetBounds(bounds)
-	}
+	// Both callbacks below run with no desktop lock held, and either may re-enter
+	// AddLayer or Redraw. notify goes first so it cannot report a layer that a
+	// layer-adding LayoutFn has already displaced.
 	if notify != nil {
 		notify()
+	}
+	if layout != nil {
+		layout()
 	}
 	d.Redraw()
 }
 
 // pushLayer performs the part of AddLayer that must not interleave with a concurrent
-// AddLayer or with the paint pipeline: the append, the modal bookkeeping and the
-// active-layer notification bookkeeping (issue #56). Keeping the append and that
-// bookkeeping in one critical section is what makes concurrent adds notify exactly once
-// per layer and leave lastNotifiedTop equal to the final top.
+// AddLayer or with the paint pipeline: the append, the modal bookkeeping, stretching a
+// fullscreen root and the active-layer notification bookkeeping (issue #56). Keeping the
+// append and that bookkeeping in one critical section is what makes concurrent adds
+// notify exactly once per layer and leave lastNotifiedTop equal to the final top.
 //
-// It executes no application callback except the injectable clock, and unlocks via
-// defer so a panic from that clock cannot leave the desktop permanently locked. The
-// work that does run application code is handed back to the caller instead: the bounds
-// a fullscreen layer is to be laid out with, and the notification to deliver.
-func (d *Desktop) pushLayer(layer *Layer) (bounds Rect, fullScreen bool, notify func()) {
+// It executes no application callback except the injectable clock, and unlocks via defer
+// so a panic from that clock cannot leave the desktop permanently locked. The two pieces
+// that do run application code are handed back to the caller to run outside the lock: a
+// fullscreen root's LayoutFn and the notification to deliver.
+func (d *Desktop) pushLayer(layer *Layer) (layout func(), notify func()) {
 	d.mutateMu.Lock()
 	defer d.mutateMu.Unlock()
 	d.layersMu.Lock()
@@ -356,9 +363,9 @@ func (d *Desktop) pushLayer(layer *Layer) (bounds Rect, fullScreen bool, notify 
 		}
 	}
 	if layer.FullScreen {
-		bounds = Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()}
+		layout = layer.Root.setBoundsNoLayout(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
 	}
-	return bounds, layer.FullScreen, d.takeActiveLayerChange()
+	return layout, d.takeActiveLayerChange()
 }
 
 // WorkArea is the region windows are constrained to when dragged, resized or

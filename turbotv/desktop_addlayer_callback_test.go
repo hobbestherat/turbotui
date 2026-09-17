@@ -64,6 +64,64 @@ func TestAddLayerFullScreenLayoutFnMayAddLayer(t *testing.T) {
 	}
 }
 
+// TestAddLayerFullScreenLayoutFnNotifiesInTopOrder pins the ordering that makes the
+// re-entrant fullscreen path honest: every OnActiveLayerChange invocation must name the
+// layer that is actually on top when it is delivered. Running a layer-adding LayoutFn
+// before the outer notification instead makes that call report the background as active
+// while the overlay it just spawned is the real top.
+func TestAddLayerFullScreenLayoutFnNotifiesInTopOrder(t *testing.T) {
+	app := tui.NewWithSize(20, 8, &bytes.Buffer{})
+	d := NewDesktop(app)
+
+	overlay := NewLayer("overlay", NewComponent(Rect{X: 2, Y: 2, W: 6, H: 2}), true, false)
+	root := NewComponent(Rect{X: 0, Y: 0, W: 1, H: 1})
+	background := NewLayer("background", root, true, true)
+
+	type notification struct {
+		got, top   *Layer
+		rootBounds Rect
+	}
+	var seen []notification
+	d.OnActiveLayerChange(func(got *Layer) {
+		seen = append(seen, notification{got: got, top: d.TopLayer(), rootBounds: root.Bounds})
+	})
+	layouts := 0
+	root.LayoutFn = func(*VisualComponent) {
+		layouts++
+		if layouts == 1 {
+			d.AddLayer(overlay)
+		}
+	}
+
+	mustNotBlock(t, "AddLayer of a fullscreen layer whose LayoutFn adds a layer", func() {
+		d.AddLayer(background)
+	})
+
+	want := []*Layer{background, overlay}
+	if len(seen) != len(want) {
+		t.Fatalf("notifications: got %d, want %d", len(seen), len(want))
+	}
+	for i, n := range seen {
+		if n.got != want[i] {
+			t.Errorf("notification %d: got layer %p, want %p", i, n.got, want[i])
+		}
+		// The whole point: the argument is the layer that is genuinely on top when the
+		// callback runs, not one a nested add has already displaced.
+		if n.got != n.top {
+			t.Errorf("notification %d reported %p while TopLayer was %p", i, n.got, n.top)
+		}
+	}
+	// The desktop-owned part of the fullscreen stretch is applied before the callback,
+	// so a callback reading the new top's bounds does not see the pre-stretch rect.
+	if full := (Rect{X: 0, Y: 0, W: 20, H: 8}); seen[0].rootBounds != full {
+		t.Errorf("bounds seen by the fullscreen layer's callback: got %v, want %v", seen[0].rootBounds, full)
+	}
+	if d.lastNotifiedTop != overlay || d.TopLayer() != overlay {
+		t.Fatalf("bookkeeping did not converge: lastNotifiedTop=%p TopLayer=%p want %p",
+			d.lastNotifiedTop, d.TopLayer(), overlay)
+	}
+}
+
 func TestAddLayerSurvivesRecoveredLayoutFnPanic(t *testing.T) {
 	app := tui.NewWithSize(20, 8, &bytes.Buffer{})
 	d := NewDesktop(app)

@@ -197,11 +197,29 @@ func (c *VisualComponent) SetEnabled(enabled bool) {
 }
 
 func (c *VisualComponent) SetBounds(bounds Rect) {
+	if layout := c.setBoundsNoLayout(bounds); layout != nil {
+		layout()
+	}
+}
+
+// setBoundsNoLayout applies the bounds change SetBounds makes but hands back its
+// LayoutFn invocation — the one piece of application code SetBounds runs — for the
+// caller to invoke instead, or nil when the component has no LayoutFn.
+//
+// It exists for Desktop.AddLayer, which stretches a fullscreen layer's root while
+// holding the desktop's paint lock (so a concurrent repaint cannot compose the layer
+// against a half-written Rect, and so the active-layer callback still observes the
+// stretched bounds) but must run the LayoutFn outside that lock and after the
+// notification, because a LayoutFn may call back into the desktop — including
+// AddLayer. Splitting it here rather than inlining the two statements at that call
+// site keeps SetBounds the single definition of what setting bounds does.
+func (c *VisualComponent) setBoundsNoLayout(bounds Rect) (layout func()) {
 	c.Bounds = bounds
 	c.invalidateAbs()
-	if c.LayoutFn != nil {
-		c.LayoutFn(c)
+	if c.LayoutFn == nil {
+		return nil
 	}
+	return func() { c.LayoutFn(c) }
 }
 
 func (c *VisualComponent) AddChild(child Widget) {

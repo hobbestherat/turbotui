@@ -529,3 +529,39 @@ the documented guarantee, the test plan, or the open questions.
    (§5.1). §1 enumerates every shared location on the path, so the fix should subsume whatever the
    second stack was — but pasting the full report into the PR would let this be confirmed rather
    than inferred.
+
+## 9. Deviations from this design, forced by implementation-stage critique
+
+Two rounds of critique found defects in callback paths §2 did not enumerate, and the fixes take the
+implementation outside what §3.1 scoped. Recorded here so the design and the code agree.
+
+**9.1 — `LayoutFn` is a second piece of arbitrary user code on the `AddLayer` path.** §3 reasoned
+that "the one piece of arbitrary user code on this path" is `OnActiveLayerChange` (C5). That is
+wrong: a `FullScreen` layer's `SetBounds` synchronously invokes the root's `LayoutFn`, which may
+call `AddLayer` just as plausibly as C5's callback may. Holding `mutateMu` across it self-deadlocks.
+The `LayoutFn` invocation therefore also runs outside the lock, and both critical sections unlock
+via `defer` so a panic out of a callback (including the injectable clock, the one user callback that
+remains inside) cannot leave the desktop permanently locked once the application recovers it.
+
+**9.2 — the notification is delivered before that `LayoutFn`, and `setBoundsNoLayout` splits
+`SetBounds` so this costs nothing observable.** §3.4's exactly-once guarantee requires the
+notification to be *reserved* under `mutateMu`, which is precisely what the pre-lock implementation
+did not do: it recomputed `TopLayer()` at delivery time, so a nested `AddLayer` from a `LayoutFn`
+self-corrected (the outer call found `top == lastNotifiedTop` and correctly emitted nothing).
+Reserving early loses that self-correction — the outer call would report the background as active
+while the overlay its own `LayoutFn` just added is the real top. The two properties cannot both
+hold: ordered-and-re-entrant delivery needs goroutine identity (§3.4). Exactly-once wins, so any
+user code able to add a layer must run *after* delivery.
+
+Deferring the whole `SetBounds` past the notification would do that, but would regress what a
+callback observes: the new top's root would still carry its pre-stretch bounds. Instead
+`VisualComponent.setBoundsNoLayout` (`component.go`, the sole production change outside
+`desktop.go`) applies the bounds change and hands back the `LayoutFn` invocation. `pushLayer`
+stretches the root under the lock — which also puts that write inside the paint lock, so a
+concurrent repaint cannot compose against a half-written `Rect` — and `AddLayer` delivers the
+notification, then runs the `LayoutFn`. `SetBounds` is re-expressed in terms of the split, so it
+remains the single definition of what setting bounds does.
+
+Residual observable change, accepted and documented on `AddLayer`: a callback for a fullscreen layer
+sees the stretched root but not yet whatever its `LayoutFn` does to the children. That is the
+narrowest available consequence of giving up delivery-time recomputation.
