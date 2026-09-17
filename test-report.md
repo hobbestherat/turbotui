@@ -1,12 +1,12 @@
 # Test report
 
-`go test -race ./...` failed before the tests could run. Both `github.com/hobbestherat/turbotui` and `github.com/hobbestherat/turbotui/turbotv` reported the exact runtime error:
+`go test -race ./...` failed before any tests executed. The root package and `turbotv` both emitted the exact runtime failure:
 
 ```text
 FATAL: ThreadSanitizer: unsupported VMA range
 FATAL: Found 47 - Supported 48
 ```
 
-There was no test assertion failure, so no assertion message is available and the race-sensitive result of `TestConcurrentAddLayerKeepsEveryLayer` could not be observed in this environment. This looks like a test-environment/toolchain incompatibility, not a defect in either the implementation or the test, because ThreadSanitizer terminates before executing tests.
+No test assertion failed, so there is no assertion message to report. In particular, this environment could not produce a race-enabled verdict for `TestConcurrentAddLayerKeepsEveryLayer`. The failure is an environment/toolchain incompatibility rather than a defect in the implementation or the test: ThreadSanitizer exits during startup because the host VMA range does not match the range it supports.
 
-As a fallback, `go test ./...` passed. Packages `github.com/hobbestherat/turbotui` and `github.com/hobbestherat/turbotui/turbotv` were `ok`; the remaining command packages had no test files. This ordinary GREEN run is only an early signal and does not establish that the data race is fixed; the cluster gate remains authoritative.
+As a fallback, an uncached `go test -count=1 ./...` passed. `github.com/hobbestherat/turbotui` and `github.com/hobbestherat/turbotui/turbotv` were `ok`; all command packages reported `[no test files]`. This ordinary GREEN result is an early signal only and cannot establish that the race is fixed. The separate cluster gate remains authoritative.

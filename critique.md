@@ -1,11 +1,11 @@
 # Critique
 
-## 1. High — re-entrant fullscreen layout reports a stale layer as active
+## 1. High — deferred layout closure can call a nil or replaced `LayoutFn`
 
-File: `turbotv/desktop.go:321-325`
+File: `turbotv/component.go:219-222`
 
-`pushLayer` records the outer layer as `lastNotifiedTop` and returns a closure for notifying it, but `AddLayer` runs the fullscreen layer's `LayoutFn` before invoking that closure. If the layout callback calls `AddLayer` for an overlay, the nested call pushes and notifies the overlay first. When control returns, the outer call then invokes its saved closure and reports the background as active even though the overlay remains the actual top layer.
+`setBoundsNoLayout` checks that `c.LayoutFn` is non-nil, but the returned closure does not capture that function value; it reads `c.LayoutFn` again when invoked. `Desktop.AddLayer` deliberately runs `OnActiveLayerChange` between those two moments (`desktop.go:328-332`), and that application callback may mutate the new layer, including its public `LayoutFn` field.
 
-Concrete failure scenario: register `OnActiveLayerChange`, create a fullscreen background whose `LayoutFn` calls `d.AddLayer(overlay)` once, then call `d.AddLayer(background)`. The callback sequence is `overlay, background`, while `d.TopLayer()` is `overlay`; after the final callback, an observer therefore believes the inactive background is the active layer. This violates the documented behavior at `desktop.go:310-312` that the callback observes the new top. The new `TestAddLayerFullScreenLayoutFnMayAddLayer` does not install a callback, so it does not detect the incorrect notification ordering.
+Concrete failure scenario: create a fullscreen layer whose root has a non-nil `LayoutFn`, register `OnActiveLayerChange(func(top *Layer) { top.Root.LayoutFn = nil })`, and call `AddLayer`. `setBoundsNoLayout` returns a non-nil closure, the notification clears the field, and then the closure executes `c.LayoutFn(c)` and panics by calling a nil function. Replacing the field instead silently invokes the replacement even though the original function was the one observed when layout was scheduled. Capture the checked function in a local and close over that value so notification-time mutation cannot invalidate the deferred call.
 
 CRITIQUE: CONCERNS
