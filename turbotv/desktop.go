@@ -27,10 +27,32 @@ const DefaultModalEnterGrace = 300 * time.Millisecond
 // that an off-loop AddLayer/RemoveLayer cannot corrupt the slice that compose and
 // hit-testing read concurrently (issue #56); the per-widget mutable state reached
 // through Post stays loop-confined.
+//
+// A second mutex, mutateMu, serializes the paint pipeline (compose/updateCursor/
+// Apply) and the AddLayer bookkeeping that must not interleave with it, so two
+// concurrent AddLayer calls cannot both be inside compose/Apply writing the App's
+// shared cell buffers. That is the full extent of the guarantee: it makes AddLayer
+// safe against another AddLayer and against the loop's coalesced repaint, and
+// nothing more. AddLayer still races with the input handlers, SetFocus, RemoveLayer,
+// RaiseLayer and every other desktop mutator, none of which take that lock, so the
+// loop-or-Post requirement above stands unchanged.
 type Desktop struct {
-	app            *tui.App
-	layersMu       sync.Mutex // guards the layers slice header (issue #56)
-	layers         []*Layer
+	app      *tui.App
+	layersMu sync.Mutex // guards the layers slice header (issue #56)
+	layers   []*Layer
+	// mutateMu serializes the desktop's paint pipeline (compose/updateCursor/Apply)
+	// and the mutator bookkeeping that must not interleave with it, so two AddLayer
+	// calls from different goroutines cannot both be inside compose/Apply — which
+	// write the App's shared back/front cell buffers, flush buffer and cursor state
+	// (issue #56). layersMu guards only the slice header; this guards the state reads
+	// and the repaint around it.
+	//
+	// It is deliberately NOT held across OnActiveLayerChange, so that callback may
+	// re-enter AddLayer. It IS held across drawing, and therefore across user DrawFn
+	// callbacks: a DrawFn must not call AddLayer or Redraw, or it will deadlock.
+	//
+	// Lock ordering: mutateMu is always acquired BEFORE layersMu, never while holding it.
+	mutateMu       sync.Mutex
 	backgroundCell tui.Cell
 	theme          Theme
 	focused        *VisualComponent
@@ -93,11 +115,11 @@ func NewDesktop(app *tui.App) *Desktop {
 		desktop.handlePaste(event)
 	})
 	// Drive coalesced redraws (issue #17): the run loop calls this at most once per
-	// iteration after draining a burst of posts, instead of one Apply per post.
+	// iteration after draining a burst of posts, instead of one Apply per post. It
+	// goes through Redraw so the loop's repaint and an off-loop AddLayer's repaint
+	// serialize on the same lock instead of both writing the App's cell buffers.
 	app.SetRedrawFn(func() {
-		desktop.compose()
-		desktop.updateCursor()
-		_ = desktop.app.Apply()
+		desktop.Redraw()
 	})
 	return desktop
 }
@@ -267,7 +289,23 @@ func (d *Desktop) ScopedBindings() *BindingRegistry {
 // A Modal layer additionally (a) pushes the currently-focused widget onto the focus-
 // history stack so closing the modal can restore it (gogent#348), and (b) is armed with
 // the current clock time for the Enter-grace window (gogent#347).
+//
+// The layer-slice update, the desktop-state reads around it and the repaint it
+// performs are each protected against a concurrent off-loop AddLayer, so concurrent
+// AddLayer calls cannot corrupt the stack or interleave inside the paint pipeline
+// (issue #56). That is not general thread-safety — AddLayer still races with the input
+// handlers, SetFocus, RemoveLayer, RaiseLayer and every other desktop mutator, none of
+// which take that lock — so callers must still use the event loop or Post while Run is
+// active.
+//
+// OnActiveLayerChange is invoked outside the lock, after the stack has been updated and
+// before the repaint, so the callback observes the new top, may re-enter AddLayer, and
+// still runs before AddLayer returns. When AddLayer is called concurrently the callback
+// fires exactly once per added layer, but the order of those invocations is unspecified
+// and two may overlap; call AddLayer on the loop (or via Post) if notification order
+// matters.
 func (d *Desktop) AddLayer(layer *Layer) {
+	d.mutateMu.Lock()
 	d.layersMu.Lock()
 	d.layers = append(d.layers, layer)
 	d.layersMu.Unlock()
@@ -286,7 +324,14 @@ func (d *Desktop) AddLayer(layer *Layer) {
 	if layer.FullScreen {
 		layer.Root.SetBounds(Rect{X: 0, Y: 0, W: d.app.Width(), H: d.app.Height()})
 	}
-	d.notifyActiveLayerChange()
+	top, notify, changed := d.takeActiveLayerChange()
+	d.mutateMu.Unlock()
+
+	// Deliver the notification with no lock held so the callback may re-enter AddLayer,
+	// and before the repaint so the ordering matches every other mutator.
+	if changed && notify != nil {
+		notify(top)
+	}
 	d.Redraw()
 }
 
@@ -362,14 +407,25 @@ func (d *Desktop) OnActiveLayerChange(fn func(top *Layer)) {
 // registered after layers already exist is not fired spuriously on the next
 // mutation. Call it on the event loop after the layer stack has been updated.
 func (d *Desktop) notifyActiveLayerChange() {
-	top := d.TopLayer()
+	if top, notify, changed := d.takeActiveLayerChange(); changed && notify != nil {
+		notify(top)
+	}
+}
+
+// takeActiveLayerChange updates the last-notified top and reports the new top, the
+// callback to invoke and whether the top changed at all. It exists so AddLayer can do
+// the bookkeeping while holding mutateMu and deliver the callback after releasing it;
+// returning the callback rather than reading the field later keeps that read inside the
+// critical section too. Like notifyActiveLayerChange it advances lastNotifiedTop even
+// when no callback is registered, so a callback registered after layers already exist is
+// not fired spuriously on the next mutation.
+func (d *Desktop) takeActiveLayerChange() (top *Layer, notify func(*Layer), changed bool) {
+	top = d.TopLayer()
 	if top == d.lastNotifiedTop {
-		return
+		return top, nil, false
 	}
 	d.lastNotifiedTop = top
-	if d.onActiveLayerChange != nil {
-		d.onActiveLayerChange(top)
-	}
+	return top, d.onActiveLayerChange, true
 }
 
 // handleResize is the desktop's terminal-resize handler. It first clamps every
@@ -660,7 +716,18 @@ func componentInLayer(c *VisualComponent, layer *Layer) bool {
 	return false
 }
 
+// Redraw recomposes the desktop and flushes it to the terminal synchronously. It is
+// the right call for paths that must be on screen within the same handler; see
+// RequestRedraw for the coalesced counterpart the hot paths use.
+//
+// It holds the desktop's paint lock for the whole compose/flush, so an off-loop
+// AddLayer's repaint and the run loop's coalesced repaint serialize instead of both
+// writing the App's shared cell buffers. A DrawFn invoked during compose therefore runs
+// with that lock held and must not call Redraw or AddLayer: doing so already recursed
+// without bound, and now deadlocks instead.
 func (d *Desktop) Redraw() {
+	d.mutateMu.Lock()
+	defer d.mutateMu.Unlock()
 	d.compose()
 	d.updateCursor()
 	_ = d.app.Apply()
